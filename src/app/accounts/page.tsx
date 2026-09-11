@@ -52,11 +52,18 @@ export default async function AccountsPage({
     );
   }
 
-  const groups: Record<string, typeof accs> = {};
-  for (const a of accs) {
-    const key = a.institution?.name ?? "Other";
-    (groups[key] ??= []).push(a);
-  }
+  // Closed accounts keep their transactions and history; they are just not
+  // what you came to this page to read. `isActive: false` already removes them
+  // from every total, so this is purely about what the list shows by default.
+  const byInstitution = (list: typeof accs) => {
+    const groups: Record<string, typeof accs> = {};
+    for (const a of list) (groups[a.institution?.name ?? "Other"] ??= []).push(a);
+    return groups;
+  };
+  const open = accs.filter((a) => a.isActive);
+  const closed = accs.filter((a) => !a.isActive);
+  const groups = byInstitution(open);
+  const closedGroups = byInstitution(closed);
 
   return (
     <>
@@ -80,8 +87,33 @@ export default async function AccountsPage({
         />
       </div>
 
-      <div className="space-y-6">
-        {Object.entries(groups).map(([inst, list]) => (
+      <AccountGroups source={groups} />
+
+      {closed.length > 0 ? (
+        <details className="mt-8 rounded-xl border">
+          <summary className="min-h-11 cursor-pointer px-4 py-3 text-sm font-medium">
+            Show closed accounts ({closed.length})
+          </summary>
+          <div className="border-t p-4">
+            <p className="text-muted-foreground mb-4 text-xs leading-5">
+              Closed accounts are excluded from net worth and every total. Their
+              transactions and past balances are kept, and reopening one restores
+              it to the lists above.
+            </p>
+            <AccountGroups source={closedGroups} />
+          </div>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+type AccountRow = Awaited<ReturnType<typeof getAccountsWithInstitution>>[number];
+
+function AccountGroups({ source }: { source: Record<string, AccountRow[]> }) {
+  return (
+    <div className="space-y-6">
+        {Object.entries(source).map(([inst, list]) => (
           <section key={inst} className="space-y-2">
             <h2 className="text-muted-foreground px-1 text-sm font-medium">
               {inst}
@@ -146,7 +178,6 @@ export default async function AccountsPage({
             </Card>
           </section>
         ))}
-      </div>
-    </>
+    </div>
   );
 }
