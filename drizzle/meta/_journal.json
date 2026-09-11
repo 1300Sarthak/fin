@@ -1,0 +1,76 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1782108878821,
+      "tag": "0000_magenta_the_leader",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1782149044180,
+      "tag": "0001_complex_tag",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787544289859,
+      "tag": "0002_complete_blink",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787546319257,
+      "tag": "0003_wet_betty_brant",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787555794943,
+      "tag": "0004_burly_runaways",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787559600000,
+      "tag": "0005_solid_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787559900000,
+      "tag": "0006_transfer_pairing",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787627248226,
+      "tag": "0007_petite_venus",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788198669754,
+      "tag": "0008_sticky_midnight",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788919167823,
+      "tag": "0009_confused_living_lightning",
+      "breakpoints": true
+    }
+  ]
+}

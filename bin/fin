@@ -1,0 +1,33 @@
+#!/bin/sh
+# Runs the finance CLI from anywhere.
+#
+#   --conditions react-server  : the lib is shared with the Next.js app, and a
+#     few modules carry `import "server-only"`. That package ships an empty
+#     build behind the react-server condition, which is exactly what a
+#     server-side script wants.
+#   DATABASE_URL               : pinned to the repo's database so the cwd does
+#     not decide which file gets read.
+set -e
+
+# Follow symlinks by hand rather than trusting `readlink -f`, which BSD only
+# grew recently. Installing this as ~/.local/bin/fin is the normal case, and
+# $0 is then the link, not the script.
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case $link in
+    /*) target=$link ;;
+    *) target=$(dirname "$target")/$link ;;
+  esac
+done
+
+here=$(cd "$(dirname "$target")/.." && pwd)
+export DATABASE_URL="${DATABASE_URL:-file:$here/finance.db}"
+
+# Bun only auto-loads .env files from the working directory, and this runs from
+# wherever the user happens to be. Point it at the repo's own file so provider
+# keys reach `categorize` and the cash parser instead of silently degrading.
+env_file=""
+[ -f "$here/.env.local" ] && env_file="--env-file=$here/.env.local"
+
+exec bun --conditions react-server $env_file "$here/cli/fin.ts" "$@"

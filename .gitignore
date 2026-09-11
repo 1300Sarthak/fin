@@ -1,0 +1,86 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local finance database (contains personal financial data — never commit)
+finance.db
+finance.db-*
+*.sqlite
+*.sqlite-*
+
+# playwright-cli screenshots/snapshots
+.playwright-cli
+
+# Atlas per-repo state (store, worktrees, checkpoints) — not source
+.atlas/
+
+# machine-local Claude Code permissions
+.claude/settings.local.json
+
+# Personal imports, exports, local archives, and isolated demo data
+.local-private/
+.data/
+uploads/
+exports/
+*.db
+*.db-*
+*.xlsx
+*.xls
+*.csv
+*.log
+!.env.example
+!examples/*.csv
+!examples/*.xlsx
+
+# Published screenshots must never show real finances. Ignore the directory and
+# allow-list each capture that was verified to come from the demo household.
+docs/screenshots/*
+!docs/screenshots/overview.png
+!docs/screenshots/spending.png
+!docs/screenshots/accounts.png
+!docs/screenshots/holdings.png
+!docs/screenshots/planning.png
+!docs/screenshots/taxes.png
+!docs/screenshots/research.png
+!docs/screenshots/guide.png
+!docs/screenshots/settings.png
+!docs/screenshots/upcoming.png
+!docs/screenshots/dark-mode.png

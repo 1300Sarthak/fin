@@ -1,0 +1,13 @@
+{
+  "monthlyTakeHome": 5200,
+  "monthlyEssentials": 2200,
+  "monthlyFlexible": 550,
+  "monthlyDebtPayments": 100,
+  "monthlyInvesting": 900,
+  "emergencyMonths": 6,
+  "goalName": "A place of our own",
+  "goalTarget": 25000,
+  "goalSaved": 8000,
+  "goalMonths": 24,
+  "shareWithAgent": false
+}
