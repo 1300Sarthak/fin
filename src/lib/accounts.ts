@@ -8,6 +8,7 @@ export const ACCOUNT_TYPE_META: Record<
   checking: { label: "Checking", icon: "wallet", isAsset: true },
   savings: { label: "Savings", icon: "piggy-bank", isAsset: true },
   hysa: { label: "HYSA", icon: "piggy-bank", isAsset: true },
+  hsa: { label: "HSA", icon: "heart-pulse", isAsset: true },
   credit: { label: "Credit Card", icon: "credit-card", isAsset: false },
   brokerage: { label: "Brokerage", icon: "chart-line", isAsset: true },
   ira: { label: "Retirement", icon: "landmark", isAsset: true },
@@ -34,7 +35,8 @@ export function inferAccountType(
 
   // Explicit account-name keywords win over the holdings signal, so a savings
   // account that happens to report holdings isn't misread as a brokerage.
-  if (/\b(roth|ira|401\s?k|403\s?b|retirement)\b/.test(s)) return "ira";
+  // Providers write the plan name as "401(K)" as often as "401k".
+  if (/\b(roth|ira|retirement)\b|401\s?\(?k\)?|403\s?\(?b\)?/.test(s)) return "ira";
   if (/\b(crypto|bitcoin|coinbase|kraken|binance|ethereum)\b/.test(s))
     return "crypto";
   if (
@@ -45,6 +47,7 @@ export function inferAccountType(
     return "credit";
   if (/\b(checking|chk|spending|cash management|cash account)\b/.test(s))
     return "checking";
+  if (/\bhsa\b|health\s+savings/.test(s)) return "hsa";
   if (/\b(hysa|high[\s-]?yield)\b/.test(s)) return "hysa";
   if (/\bsavings?\b|\bsave\b/.test(s)) return "savings";
   if (/\b(loan|mortgage)\b/.test(s)) return "loan";

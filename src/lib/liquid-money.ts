@@ -6,14 +6,16 @@ export type LiquidAccount = {
 };
 
 export type LiquidMoneySummary = {
-  /** Spendable balances today, excluding brokerage, IRA, and crypto accounts. */
+  /** Spendable balances today, excluding brokerage, IRA, crypto, and HSA. */
   liquidAssetsCents: number;
   /** All outstanding liability balances. A credit limit is never included. */
   liabilitiesCents: number;
   liquidAfterLiabilitiesCents: number;
 };
 
-const investmentAccountTypeSet = new Set(["brokerage", "ira", "crypto"]);
+// An HSA is spendable only against qualified medical costs, and is usually
+// invested rather than held as cash, so it is not budgeting money either.
+const investmentAccountTypeSet = new Set(["brokerage", "ira", "crypto", "hsa"]);
 
 /**
  * Available balance is the best present-day spending number when an asset

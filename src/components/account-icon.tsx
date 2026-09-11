@@ -7,6 +7,7 @@ import {
   Bitcoin,
   Banknote,
   HandCoins,
+  HeartPulse,
   type LucideIcon,
 } from "lucide-react";
 import type { AccountType } from "@/db/schema";
@@ -15,6 +16,7 @@ const ICONS: Record<AccountType, LucideIcon> = {
   checking: Wallet,
   savings: PiggyBank,
   hysa: PiggyBank,
+  hsa: HeartPulse,
   credit: CreditCard,
   brokerage: TrendingUp,
   ira: Landmark,

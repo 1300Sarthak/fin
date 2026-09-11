@@ -26,6 +26,7 @@ export const accountType = [
   "checking",
   "savings",
   "hysa",
+  "hsa",
   "credit",
   "brokerage",
   "ira",
