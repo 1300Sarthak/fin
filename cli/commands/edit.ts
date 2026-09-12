@@ -62,8 +62,13 @@ export async function cat(a: Args, json: boolean) {
   }
 
   const what = await describe(id);
-  await setManualCategory(id, hits[0].id);
-  emit(json, { id, category: hits[0].name }, () => `  ${what}\n  → ${hits[0].name} (remembered for this merchant)`);
+  const { remembered } = await setManualCategory(id, hits[0].id);
+  // A direction-specific fix (an outflow filed as income, say) deliberately
+  // writes no merchant rule, so do not claim it was remembered.
+  const note = remembered
+    ? "remembered for this merchant"
+    : "this row only — a merchant rule would mislabel its other transactions";
+  emit(json, { id, category: hits[0].name, remembered }, () => `  ${what}\n  → ${hits[0].name} (${note})`);
 }
 
 /** Drop a row from every metric while leaving it visible in the ledger. */

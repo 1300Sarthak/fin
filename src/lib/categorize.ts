@@ -230,9 +230,9 @@ export async function categorizeUncategorized(opts?: {
 }
 
 /** Manual override: assign a category, remember it as a rule + cache so it sticks. */
-export async function setManualCategory(txnId: number, categoryId: number | null) {
+export async function setManualCategory(txnId: number, categoryId: number | null): Promise<{ remembered: boolean }> {
   const txn = await db
-    .select({ payee: transactions.payeeNormalized, merchant: transactions.merchantRaw, transferPairTxnId: transactions.transferPairTxnId })
+    .select({ payee: transactions.payeeNormalized, merchant: transactions.merchantRaw, amountCents: transactions.amountCents, transferPairTxnId: transactions.transferPairTxnId })
     .from(transactions)
     .where(eq(transactions.id, txnId))
     .get();
@@ -242,7 +242,7 @@ export async function setManualCategory(txnId: number, categoryId: number | null
   }
   if (categoryId == null) {
     await db.update(transactions).set({ categoryId: null, categorySource: "uncategorized", categoryConfidence: null, isTransfer: false }).where(eq(transactions.id, txnId));
-    return;
+    return { remembered: false };
   }
   const { byId } = await loadCategoryIndex();
   const cat = byId.get(categoryId);
@@ -250,14 +250,35 @@ export async function setManualCategory(txnId: number, categoryId: number | null
 
   await applyCategory(txnId, categoryId, "manual", cat.kind, 1);
 
-  // Learn: create a user rule for this merchant (if not already present) + cache it.
-  if (txn.payee) {
-    const exists = await db
+  // Learn: remember this merchant's category, unless the correction was about
+  // this one transaction rather than the merchant.
+  //
+  // An outflow filed under an income category (or the reverse) is a
+  // direction-specific fix — a refund from a shop you normally buy from, say.
+  // Writing a merchant rule from it would relabel every future purchase there
+  // as income and drop them out of spending entirely.
+  const directional =
+    (cat.kind === "income" && txn.amountCents < 0) ||
+    (cat.kind === "expense" && txn.amountCents > 0);
+
+  if (txn.payee && !directional) {
+    // Replace any existing user rule for this merchant instead of adding a
+    // rival at the same priority: rules are applied by (priority, id), so a
+    // duplicate would let the *oldest* correction quietly outrank the newest.
+    const existing = await db
       .select({ id: categoryRules.id })
       .from(categoryRules)
-      .where(and(eq(categoryRules.pattern, txn.payee), eq(categoryRules.categoryId, categoryId)))
-      .get();
-    if (!exists) {
+      .where(and(eq(categoryRules.pattern, txn.payee), eq(categoryRules.createdBy, "user")))
+      .all();
+    if (existing.length) {
+      await db
+        .update(categoryRules)
+        .set({ categoryId })
+        .where(eq(categoryRules.id, existing[0].id));
+      for (const stale of existing.slice(1)) {
+        await db.delete(categoryRules).where(eq(categoryRules.id, stale.id));
+      }
+    } else {
       await db.insert(categoryRules).values({
         pattern: txn.payee,
         categoryId,
@@ -266,5 +287,7 @@ export async function setManualCategory(txnId: number, categoryId: number | null
       });
     }
     await cacheMerchant(txn.merchant, categoryId, 1);
+    return { remembered: true };
   }
+  return { remembered: false };
 }
