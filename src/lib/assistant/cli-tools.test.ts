@@ -89,6 +89,13 @@ describe("get_fin", () => {
 });
 
 describe("propose_fin_write", () => {
+  test("a write that names a file is refused before its dry run reads anything", async () => {
+    for (const inv of [
+      { command: "attachments", args: ["add", "/tmp/statement.csv"] },
+      { command: "trips", args: ["import", "trips.json"] },
+      { command: "business", args: ["add", "Desk"], flags: { amount: "5", "paid-with": "~/notes.txt" } },
+    ]) expect((await run("propose_fin_write", inv)).error).toBeTruthy();
+  });
   test("business add: dry-run proposal writes nothing; apply writes, backs up and audits; undo removes it", async () => {
     const proposals: Change[] = [];
     const out = await run("propose_fin_write", { command: "business", args: ["add", "Standing desk"], flags: { amount: "249.99", year: "2026", category: "furniture" }, description: "Log the desk" }, proposals);

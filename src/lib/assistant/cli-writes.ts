@@ -110,6 +110,11 @@ export async function proposeCliWrite(inv: Invocation, description?: string, ori
   const { command, argv, classification } = resolved;
   if (classification.kind !== "write") throw new ChangeError("invalid", classification.kind === "read" ? "That command only reads; run it with get_fin instead." : `fin ${command} cannot be proposed: ${classification.reason}.`);
   if (WRITE_DENY.has(command)) throw new ChangeError("invalid", `fin ${command} ${classification.verb} changes files or the bank connection; run it from the terminal instead.`);
+  // The dry run below executes now, before anyone presses Apply, and its output
+  // is stored as the preview; a write that names a file must never get that far.
+  if (classification.verb === "import" || [...inv.positionals, ...Object.values(inv.flags)].some((v) => typeof v === "string" && /[/~]/.test(v))) {
+    throw new ChangeError("invalid", `fin ${command} ${classification.verb} reads a file; run it from the terminal instead.`);
+  }
   const takesFile = catalog.commands[command].flags.includes("file");
   if (body !== undefined && !takesFile) throw new ChangeError("invalid", `fin ${command} does not take a JSON body.`);
   if (body === undefined && takesFile && classification.verb === "set") throw new ChangeError("invalid", `fin ${command} set needs its JSON in body (see fin ${command} schema).`);

@@ -27,11 +27,11 @@ const SNAPSHOT_WRITE = /^local database — refreshes today's balance snapshot/;
 /** Reads that bypass the assistant's data minimisation. Still on the CLI, just not here. */
 export const READ_DENY = new Set(["sql"]);
 /**
- * Writes not proposable from chat: `import` and `export` take file paths, and
- * `config` holds the bank connection. `plan set` / `taxes set` are proposable
+ * Writes not proposable from chat: `import`, `export` and `attachments` take
+ * file paths, and `config` holds the bank connection. `plan set` / `taxes set` are proposable
  * with a JSON body that cli-writes.ts puts in a private file itself.
  */
-export const WRITE_DENY = new Set(["config", "import", "export"]);
+export const WRITE_DENY = new Set(["config", "import", "export", "attachments"]);
 /** Verbs that manage existing rows in an "unless the verb is" command; any other first word is the text of a new row. */
 const MANAGE_VERBS = new Set(["done", "rm", "remove", "delete", "pin", "unpin"]);
 /** Flags that read or write files, or change what leaves the machine. */
