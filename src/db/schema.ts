@@ -154,6 +154,36 @@ export const merchantCache = sqliteTable("merchant_cache", {
   updatedAt: integer({ mode: "timestamp" }).notNull().default(now),
 });
 
+export const changeKind = ["recategorize", "split", "reimbursement", "exclude", "include", "cli"] as const;
+export type ChangeKind = (typeof changeKind)[number];
+export const changeStatus = ["proposed", "applied", "discarded", "undone"] as const;
+export type ChangeStatus = (typeof changeStatus)[number];
+
+/**
+ * Audit log for ledger edits made through the money assistant (or its CLI
+ * twin). A row is first a PROPOSAL: nothing in `transactions` changes until
+ * `applyChange` runs. `beforeJson` is the exact state the edit replaces, so it
+ * can be refused as stale and restored byte for byte; `afterJson` records what
+ * was written, including any rule or cache entry created along the way.
+ */
+export const ledgerChanges = sqliteTable(
+  "ledger_changes",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+    status: text({ enum: changeStatus }).notNull().default("proposed"),
+    kind: text({ enum: changeKind }).notNull(),
+    txnId: integer().notNull(),
+    summary: text().notNull(),
+    beforeJson: text().notNull(),
+    afterJson: text().notNull(),
+    appliedAt: integer({ mode: "timestamp" }),
+    undoneAt: integer({ mode: "timestamp" }),
+    origin: text({ enum: ["assistant", "cli"] }).notNull().default("assistant"),
+  },
+  (t) => [index("ledger_changes_txn_idx").on(t.txnId), index("ledger_changes_status_idx").on(t.status)],
+);
+
 export const balanceSnapshots = sqliteTable(
   "balance_snapshots",
   {
@@ -469,5 +499,6 @@ export type NetWorthMilestone = typeof netWorthMilestones.$inferSelect;
 export type NewNetWorthMilestone = typeof netWorthMilestones.$inferInsert;
 export type NetWorthMilestoneLine = typeof netWorthMilestoneLines.$inferSelect;
 export type NewNetWorthMilestoneLine = typeof netWorthMilestoneLines.$inferInsert;
+export type LedgerChange = typeof ledgerChanges.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type NewNote = typeof notes.$inferInsert;
