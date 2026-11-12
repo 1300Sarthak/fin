@@ -618,3 +618,27 @@ export const tripBookings = sqliteTable(
   (t) => [index("trip_bookings_start_idx").on(t.startDate)],
 );
 
+/**
+ * Credit cards the user holds and how they earn. Rates are basis points of
+ * spend (300 = 3%). `categoryRatesJson` is a JSON array of
+ * { category, rateBp, capCents?, period?, note? } where `category` is a fin
+ * category name or a keyword like "chase travel" / "dining" / "rotating".
+ * `accountId` links the card to its synced ledger account when there is one.
+ */
+export const creditCards = sqliteTable("credit_cards", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  name: text().notNull().unique(),
+  issuer: text(),
+  accountId: integer().references(() => accounts.id, { onDelete: "set null" }),
+  rewardCurrency: text().notNull().default("cash"), // cash | chase ur | ...
+  baseRateBp: integer().notNull().default(100),
+  categoryRatesJson: text().notNull().default("[]"),
+  annualFeeCents: integer().notNull().default(0),
+  foreignFeeBp: integer(), // null = unknown
+  perks: text(),
+  openedOn: text(), // "YYYY-MM-DD"
+  active: integer({ mode: "boolean" }).notNull().default(true),
+  note: text(),
+  updatedAt: integer({ mode: "timestamp" }).notNull().default(now),
+});
+
