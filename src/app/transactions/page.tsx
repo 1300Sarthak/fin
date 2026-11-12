@@ -1,159 +1,101 @@
-import { PageHeader } from "@/components/page-header";
-import { EmptyState } from "@/components/empty-state";
+import Link from "next/link";
+import { ArrowLeftRight } from "lucide-react";
+import { format, parseISO } from "date-fns";
+import { EmptyState, Money, PageHeader, RangePicker, resolveRange, Stat, StatGroup, type ResolvedRange } from "@/components/kit";
 import { ConnectDataActions, NO_DATA_DESCRIPTION } from "@/components/connect-data";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
-import { ArrowLeftRight, Search } from "lucide-react";
-import {
-  getTransactions,
-  countTransactions,
-  getCategoriesForSelect,
-  getAccountsList,
-} from "@/lib/queries";
-import { subDays, startOfDay, startOfYear } from "date-fns";
 import { CategorizeButton } from "@/components/categorize-button";
-import { AccountFilter } from "@/components/account-filter";
-import { RangeSelector } from "@/components/range-selector";
-import { TransactionsTable } from "@/components/transactions-table";
+import { buttonVariants } from "@/components/ui/button";
+import { countTransactions, getAccountsList, getCategoriesForSelect } from "@/lib/queries";
+import { getFilteredTransactions, parseTxnFilter, type TxnFilter } from "@/lib/txn-filter";
+import { cn } from "@/lib/utils";
+import { TxnToolbar } from "./_components/txn-toolbar";
+import { TxnLedger } from "./_components/txn-ledger";
 
 export const dynamic = "force-dynamic";
 
-const PAGE_SIZE = 50;
-const RANGED_LIMIT = 1000;
+const PAGE = 150;
+const MAX = 3000;
+type Params = { [key: string]: string | string[] | undefined };
 
-const TXN_RANGES = [
-  { value: "recent", label: "Recent" },
-  { value: "1M", label: "1M" },
-  { value: "3M", label: "3M" },
-  { value: "6M", label: "6M" },
-  { value: "YTD", label: "YTD" },
-  { value: "1Y", label: "1Y" },
-];
-const TXN_KINDS = [
-  { value: "all", label: "All" },
-  { value: "income", label: "Income" },
-];
-const TXN_RANGE_DAYS: Record<string, number> = {
-  "1W": 7,
-  "1M": 30,
-  "3M": 90,
-  "6M": 182,
-  "1Y": 365,
-};
-const VALID_TXN_RANGES = new Set(TXN_RANGES.map((r) => r.value));
-const VALID_TXN_KINDS = new Set(TXN_KINDS.map((r) => r.value));
+/**
+ * Contract links carry bare `from`/`to` (no `period`), so either bound alone
+ * means a custom range; otherwise the RangePicker's presets apply, defaulting
+ * to all time so a filter link without dates still finds every match.
+ */
+function rangeFor(params: Params, f: TxnFilter): ResolvedRange {
+  if (f.from || f.to) {
+    const label = (d: string) => format(parseISO(d), "MMM d, yyyy");
+    if (f.from && f.to) return resolveRange({ period: "custom", from: f.from, to: f.to });
+    return { preset: "custom", from: f.from ?? null, to: f.to ?? null, label: f.from ? `Since ${label(f.from)}` : `Through ${label(f.to!)}` };
+  }
+  return resolveRange(params, { fallback: "all" });
+}
 
-export default async function TransactionsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ q?: string; account?: string; range?: string; kind?: string }>;
-}) {
-  const { q, account, range, kind } = await searchParams;
-  const accountId = account ? Number(account) : undefined;
-  const rangeVal = range && VALID_TXN_RANGES.has(range) ? range : "recent";
-  const kindVal = kind && VALID_TXN_KINDS.has(kind) ? kind : "all";
-  const amountType = kindVal === "income" ? "income" : undefined;
-  const since =
-    rangeVal === "YTD"
-      ? startOfYear(new Date())
-      : TXN_RANGE_DAYS[rangeVal]
-        ? startOfDay(subDays(new Date(), TXN_RANGE_DAYS[rangeVal]))
-        : undefined;
-  const limit = since ? RANGED_LIMIT : PAGE_SIZE;
+export default async function TransactionsPage({ searchParams }: { searchParams: Promise<Params> }) {
+  const params = await searchParams;
+  const parsed = parseTxnFilter(params);
+  const range = rangeFor(params, parsed);
+  const filter: TxnFilter = { ...parsed, from: range.from ?? undefined, to: range.to ?? undefined };
+  const shown = Math.min(MAX, Math.max(PAGE, Number(params.limit) || PAGE));
 
-  const [rows, total, selectCategories, accounts] = await Promise.all([
-    getTransactions({ q, accountId, since, limit, amountType }),
-    countTransactions({ amountType }),
+  const [{ rows, totals }, ledgerSize, categories, accounts] = await Promise.all([
+    getFilteredTransactions(filter, { limit: shown }),
+    countTransactions(),
     getCategoriesForSelect(),
     getAccountsList(),
   ]);
 
-  const activeAccount = accounts.find((a) => a.id === accountId);
-  // Only a genuinely empty ledger gets the connect-your-data pitch.
-  const firstRun = total === 0 && kindVal === "all" && !q && accountId === undefined;
-  const rangeLabel = TXN_RANGES.find((r) => r.value === rangeVal)?.label;
-  const kindLabel = kindVal === "income" ? "income" : "transactions";
+  if (ledgerSize === 0) {
+    return (
+      <>
+        <PageHeader title="Transactions" description="Every row from every account, searchable." />
+        <EmptyState icon={ArrowLeftRight} title="No transactions yet" description={NO_DATA_DESCRIPTION} action={<ConnectDataActions />} />
+      </>
+    );
+  }
+
+  const account = accounts.find((a) => a.id === filter.account);
+  const cashflow = filter.kind === "cashflow";
+  const spent = cashflow || filter.kind === "expense";
+  const filtered = Object.entries(parsed).some(([k, v]) => v != null && k !== "from" && k !== "to");
+  const more = new URLSearchParams(Object.entries(params).flatMap(([k, v]) => (typeof v === "string" ? [[k, v]] : [])));
+  more.set("limit", String(Math.min(MAX, shown + PAGE * 2)));
 
   return (
     <>
       <PageHeader
         title="Transactions"
-        description={
-          rangeVal !== "recent"
-            ? `${rows.length.toLocaleString()} ${kindLabel} ${rangeVal === "YTD" ? "this year" : `in the last ${rangeLabel}`}${activeAccount ? ` · ${activeAccount.name}` : ""}.`
-            : activeAccount
-              ? `Showing ${kindLabel} for ${activeAccount.name}.`
-              : `${total.toLocaleString()} ${kindLabel} across all accounts.`
-        }
-      >
-        <CategorizeButton />
-        <RangeSelector
-          options={TXN_KINDS}
-          value={kindVal}
-          paramKey="kind"
-          defaultValue="all"
-        />
-        <RangeSelector options={TXN_RANGES} value={rangeVal} defaultValue="recent" />
-        <AccountFilter accounts={accounts} />
-        <form className="flex items-center gap-2">
-          {account && <input type="hidden" name="account" value={account} />}
-          {range && <input type="hidden" name="range" value={range} />}
-          {kindVal !== "all" && <input type="hidden" name="kind" value={kindVal} />}
-          <div className="relative">
-            <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
-            <Input
-              name="q"
-              type="search"
-              defaultValue={q ?? ""}
-              aria-label="Search transactions"
-              placeholder="Search…"
-              className="w-44 pl-8"
-            />
-          </div>
-          <Button type="submit" variant="outline" size="sm">
-            Search
-          </Button>
-        </form>
-      </PageHeader>
+        description={`${totals.count.toLocaleString()} ${filtered ? "matching transactions" : "transactions"} · ${range.label}${account ? ` · ${account.name}` : ""}`}
+        actions={<><CategorizeButton /><RangePicker value={range} fallback="all" /></>}
+      />
 
-      {rows.length === 0 ? (
-        firstRun ? (
+      <TxnToolbar filter={parsed} range={range} accounts={accounts} categories={categories} />
+
+      <StatGroup cols={4} className="mt-4">
+        <Stat label="Transactions" value={totals.count.toLocaleString()} sub={totals.countedRows !== totals.count ? `${(totals.count - totals.countedRows).toLocaleString()} not counted` : undefined} help="Transfers and rows marked never-count are listed but left out of the money totals, matching how the rest of the app counts cash flow." />
+        <Stat label={cashflow ? "Made" : "Money in"} value={<Money cents={totals.inCents} />} tone={totals.inCents ? "positive" : "none"} help={cashflow ? "The same figure as Made on the Spending page." : undefined} />
+        <Stat label={spent ? "Spent" : "Money out"} value={<Money cents={totals.outCents} />} tone={totals.outCents ? "negative" : "none"} help={spent ? "Purchases net of refunds, the same figure as Spent on the Spending page." : undefined} />
+        <Stat label="Net" value={<Money cents={totals.netCents} signed />} tone={totals.netCents < 0 ? "negative" : totals.netCents > 0 ? "positive" : "none"} />
+      </StatGroup>
+
+      <div className="mt-6">
+        {rows.length === 0 ? (
           <EmptyState
             icon={ArrowLeftRight}
-            title="No transactions yet"
-            description={NO_DATA_DESCRIPTION}
-            action={<ConnectDataActions />}
+            title="Nothing matches"
+            description="Remove a filter or widen the date range to see more."
+            action={<Link href="/transactions" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>Clear all filters</Link>}
           />
         ) : (
-          <EmptyState
-            icon={ArrowLeftRight}
-            title={q ? "No matching transactions" : "Nothing in this view"}
-            description={
-              q
-                ? `Nothing matches “${q}”. Try a shorter term, or widen the time range.`
-                : kindVal === "income"
-                  ? "No income transactions match these filters."
-                  : "Widen the time range or clear the account filter to see more."
-            }
-          />
-        )
-      ) : (
-        <Card className="py-0">
-          <TransactionsTable rows={rows} categories={selectCategories} />
-        </Card>
-      )}
-
-      {rangeVal === "recent" && rows.length === PAGE_SIZE && (
-        <p className="text-muted-foreground mt-3 text-center text-xs">
-          Showing the {PAGE_SIZE} most recent. Pick a time range or search to see more.
-        </p>
-      )}
-      {rangeVal !== "recent" && rows.length === RANGED_LIMIT && (
-        <p className="text-muted-foreground mt-3 text-center text-xs">
-          Showing the first {RANGED_LIMIT}. Narrow by account or search.
-        </p>
-      )}
+          <TxnLedger rows={rows} categories={categories} />
+        )}
+        {rows.length < totals.count && (
+          <div className="text-muted-foreground mt-4 flex items-center justify-center gap-3 text-[13px]">
+            <span className="num">Showing {rows.length.toLocaleString()} of {totals.count.toLocaleString()}</span>
+            {shown < MAX && <Link scroll={false} href={`/transactions?${more}`} className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>Show more</Link>}
+          </div>
+        )}
+      </div>
     </>
   );
 }
