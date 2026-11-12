@@ -68,18 +68,18 @@ async function loadGoalContext() {
  * not they have a parent. Parent goals are display rollups (see getGoalsTree)
  * and never compete for surplus, so the pure engine stays unaware of hierarchy.
  */
-export async function getGoalsWithCurrent(): Promise<PlannerGoal[]> {
-  const { gs, childrenOf, resolveLeafCurrent } = await loadGoalContext();
-  return gs
-    .filter((g) => !childrenOf.has(g.id))
-    .map((g) => ({
-      id: g.id,
-      name: g.name,
-      type: g.type,
-      priority: g.priority,
-      targetCents: g.targetCents,
-      currentCents: resolveLeafCurrent(g),
-    }));
+export async function getGoalsWithCurrent(): Promise<{ goals: PlannerGoal[]; left: { id: number; name: string; why: string }[] }> {
+  const { gs, childrenOf, resolveLeafCurrent, today } = await loadGoalContext();
+  const fundable: PlannerGoal[] = [];
+  const left: { id: number; name: string; why: string }[] = [];
+  for (const g of gs.filter((x) => !childrenOf.has(x.id))) {
+    const currentCents = resolveLeafCurrent(g);
+    // Tax-year goals reset each year: funded, closed and payroll-funded ones leave the plan.
+    const w = planWindow({ progressKind: g.progressKind, taxYear: g.taxYear, targetCents: g.targetCents, currentCents }, today);
+    if (!w.include) { left.push({ id: g.id, name: g.name, why: w.why }); continue; }
+    fundable.push({ id: g.id, name: g.name, type: g.type, priority: g.priority, targetCents: g.targetCents, currentCents, opensInMonths: w.opensInMonths, closesAfterMonths: w.closesAfterMonths });
+  }
+  return { goals: fundable, left };
 }
 
 export type GoalNode = {
