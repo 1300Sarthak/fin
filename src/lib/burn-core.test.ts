@@ -113,6 +113,85 @@ describe("burn engine", () => {
     expect(r.total.grossSpendCents).toBe(0);
   });
 
+  // Shapes copied from the Fidelity ledger: each deposit arrives as a negative
+  // "Cash Contribution Current Year" and a positive "Current Year Contribution",
+  // plus a bare "Fidelity" leg that sweeps the cash into the money-market core.
+  const roth = { accountId: 10, account: "ROTH IRA (3579)", accountType: "ira" } as const;
+  const k401 = { accountId: 11, account: "ACME CORP 401(K) PLAN (9012)", accountType: "ira" } as const;
+  const hsa = { accountId: 24, account: "Health Savings Account (3456)", accountType: "hsa" } as const;
+
+  test("a contribution Fidelity books twice is counted once, beside its sweep leg", () => {
+    const rows = [
+      row({ ...roth, postedAt: "2026-06-30", amountCents: -300000, merchantRaw: "Cash Contribution Current Year", category: "Taxes", categoryKind: "expense" }),
+      row({ ...roth, postedAt: "2026-06-30", amountCents: 300000, merchantRaw: "Fidelity", category: "Fees & Charges", categoryKind: "expense" }),
+      row({ ...roth, postedAt: "2026-06-30", amountCents: 300000, merchantRaw: "Current Year Contribution", category: "Investments", categoryKind: "investment" }),
+    ];
+    const r = report(rows);
+    expect(r.rows.map((x) => x.kind)).toEqual(["market", "market", "contribution"]);
+    expect(r.rows[0].pairedWith).toBe(rows[2].id);
+    expect(r.total.contributionCents).toBe(300000);
+    expect(r.total.grossSpendCents).toBe(0);
+    expect(r.total.incomeCents).toBe(0);
+  });
+
+  test("a 401(k) deferral reported as a same-day +/- pair is counted once, not netted away", () => {
+    const rows = [
+      row({ ...k401, postedAt: "2026-06-14", amountCents: -50000, merchantRaw: "Contribution", category: "Investments", categoryKind: "investment" }),
+      row({ ...k401, postedAt: "2026-06-14", amountCents: 50000, merchantRaw: "Contribution", category: "Investments", categoryKind: "investment" }),
+    ];
+    const r = report(rows);
+    expect(kindOf(rows, rows[1].id)).toBe("pretax");
+    expect(r.total.pretaxCents).toBe(50000);
+    expect(r.total.earnedCents).toBe(50000);
+  });
+
+  test("two real same-day deposits of the same size are both counted", () => {
+    const rows = [
+      row({ ...roth, postedAt: "2026-06-13", amountCents: 290000, merchantRaw: "Current Year Contribution", category: "Investments", categoryKind: "investment" }),
+      row({ ...roth, postedAt: "2026-06-13", amountCents: 290000, merchantRaw: "Current Year Contribution", category: "Investments", categoryKind: "investment" }),
+    ];
+    expect(report(rows).total.contributionCents).toBe(580000);
+  });
+
+  test("the redundant leg cannot steal the funding leg its twin needs", () => {
+    // Funded from savings: everything is internal, nothing is new income.
+    const rows = [
+      row({ ...roth, postedAt: "2026-06-09", amountCents: -140000, merchantRaw: "Cash Contribution Current Year", category: "Taxes", categoryKind: "expense" }),
+      row({ ...roth, postedAt: "2026-06-09", amountCents: 140000, merchantRaw: "Current Year Contribution", category: "Investments", categoryKind: "investment" }),
+      row({ postedAt: "2026-06-09", amountCents: -140000, accountId: 12, account: "Savings", accountType: "savings", merchantRaw: "Fidelity Brokerage Services", category: "Brokerage", categoryKind: "investment" }),
+    ];
+    const r = report(rows);
+    expect(r.rows.map((x) => x.kind)).toEqual(["market", "internal", "internal"]);
+    expect(r.total.takeHomeCents).toBe(0);
+    expect(r.total.grossSpendCents).toBe(0);
+  });
+
+  test("an HSA contribution survives its same-day sweep, and HSA sweeps are not income or spending", () => {
+    const rows = [
+      row({ ...hsa, postedAt: "2026-06-29", amountCents: -59000, merchantRaw: "Fidelity", category: "Fees & Charges", categoryKind: "expense" }),
+      row({ ...hsa, postedAt: "2026-06-29", amountCents: 59000, merchantRaw: "HSA Contribution", category: "Investments", categoryKind: "investment" }),
+      row({ ...hsa, postedAt: "2026-06-10", amountCents: 9955, merchantRaw: "Fidelity", category: "Fees & Charges", categoryKind: "expense" }),
+      row({ ...hsa, postedAt: "2026-06-09", amountCents: -9955, merchantRaw: "Investment Buy", category: "Investments", categoryKind: "investment" }),
+    ];
+    const r = report(rows);
+    expect(r.rows.map((x) => x.kind)).toEqual(["market", "contribution", "market", "market"]);
+    expect(r.total.contributionCents).toBe(59000);
+    expect(r.total.incomeCents).toBe(0);
+    expect(r.total.grossSpendCents).toBe(0);
+  });
+
+  test("a cash-management money-market sweep is internal, not a fee", () => {
+    const cma = { accountId: 23, account: "Cash Management (Individual) (6420)", accountType: "checking" } as const;
+    const rows = [
+      row({ ...cma, postedAt: "2026-06-09", amountCents: -20000, merchantRaw: "Fidelity", category: "Fees & Charges", categoryKind: "expense" }),
+      row({ ...cma, postedAt: "2026-06-30", amountCents: -39, merchantRaw: "Fidelity", category: "Fees & Charges", categoryKind: "expense" }),
+      row({ ...cma, postedAt: "2026-06-30", amountCents: -500, merchantRaw: "Monthly maintenance fee", category: "Fees & Charges", categoryKind: "expense" }),
+    ];
+    const r = report(rows);
+    expect(r.rows.map((x) => x.kind)).toEqual(["internal", "internal", "spend"]);
+    expect(r.total.grossSpendCents).toBe(500);
+  });
+
   test("burn and savings rate are complements of take-home", () => {
     const rows = [
       row({ postedAt: "2026-06-02", amountCents: 400000, merchantRaw: "Payroll", category: "Paycheck", categoryKind: "income" }),

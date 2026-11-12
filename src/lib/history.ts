@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { accounts, transactions, categories } from "@/db/schema";
+import { transactions, categories } from "@/db/schema";
 import { and, eq, gte, lte, inArray } from "drizzle-orm";
 import {
   parseISO,
@@ -14,10 +14,11 @@ import {
   format,
 } from "date-fns";
 import { isoDate } from "@/lib/format";
-import { resolveInclusion, getNetWorthSeries } from "@/lib/networth";
+import { resolveInclusion, getNetWorthSeries, getRetirementContributions, cashflowScope } from "@/lib/networth";
 import { getAccountTotals } from "@/lib/queries";
 import { getMilestones } from "@/lib/milestones";
-import { classifyInvestmentActivity, contributionAmountCents } from "@/lib/investment-activity";
+import { contributionAmountCents } from "@/lib/investment-activity";
+import { getCashflow } from "@/lib/spending";
 
 export type PeriodType = "week" | "month";
 
@@ -93,31 +94,19 @@ export async function getPeriodHistory(periodType: PeriodType): Promise<PeriodRo
   const retirementByPeriod = new Map<string, number>();
   const spendByPeriod = new Map<string, number>();
   if (ids.length) {
-    const txs = await db
-      .select({ postedAt: transactions.postedAt, amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, categoryName: categories.name, categoryKind: categories.kind, accountType: accounts.type, accountName: accounts.name, isRefund: transactions.isRefund })
-      .from(transactions)
-      .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-      .leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .where(
-        and(
-          inArray(transactions.accountId, ids),
-          eq(transactions.isTransfer, false),
-          eq(transactions.isExcluded, false),
-          gte(transactions.postedAt, startOfDay(parseISO(series.startDate))),
-        ),
-      );
-    for (const t of txs) {
+    const seriesStart = startOfDay(parseISO(series.startDate));
+    for (const t of await getRetirementContributions(ids, seriesStart)) {
       const key = periodKeyOf(t.postedAt, periodType);
-      const investmentAccount = t.accountType === "brokerage" || t.accountType === "ira" || t.accountType === "crypto";
-      const retirementContribution = investmentAccount && classifyInvestmentActivity(t).kind === "contribution" && (t.accountType === "ira" || /\b401\s?\(?k\)?|403\s?\(?b\)?|retirement\b/i.test(t.accountName));
-      if (retirementContribution) {
-        retirementByPeriod.set(key, (retirementByPeriod.get(key) ?? 0) + contributionAmountCents(t.amountCents));
-      } else if (!investmentAccount && t.amountCents > 0 && !t.isRefund && t.categoryKind !== "transfer" && t.categoryKind !== "investment") {
-        incomeByPeriod.set(key, (incomeByPeriod.get(key) ?? 0) + t.amountCents);
-      } else if (!investmentAccount && t.amountCents < 0 && t.categoryKind !== "transfer" && t.categoryKind !== "investment") {
-        spendByPeriod.set(key, (spendByPeriod.get(key) ?? 0) + -t.amountCents);
-      }
+      retirementByPeriod.set(key, (retirementByPeriod.get(key) ?? 0) + contributionAmountCents(t.amountCents));
     }
+    // Made and Spent per period are the Spending page's numbers for those days.
+    const scope = await cashflowScope(includeIds, allActiveIds);
+    await Promise.all([...byPeriod].filter(([, p]) => p.end >= seriesStart).map(async ([key, p]) => {
+      const start = p.start > seriesStart ? p.start : seriesStart;
+      const flow = await getCashflow({ start, end: p.end, key, label: p.label }, scope);
+      incomeByPeriod.set(key, flow.incomeCents);
+      spendByPeriod.set(key, flow.spendingCents);
+    }));
   }
 
   const keys = [...byPeriod.keys()].sort(); // chronological
