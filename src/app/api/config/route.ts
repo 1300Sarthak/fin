@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { setConfig, setHideCash, setHideZeroAccounts } from "@/lib/config";
+import { setConfig, setHideCash, setHideZeroAccounts, setSidebarVisibleTabs } from "@/lib/config";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     if (typeof body.hideCash === "boolean") await setHideCash(body.hideCash);
     if (typeof body.hideZeroAccounts === "boolean") await setHideZeroAccounts(body.hideZeroAccounts);
     if (Array.isArray(body.sidebarVisibleTabs) && body.sidebarVisibleTabs.every((tab) => typeof tab === "string")) {
-      await setConfig("sidebar_visible_tabs", body.sidebarVisibleTabs.join(","));
+      await setSidebarVisibleTabs(body.sidebarVisibleTabs);
     }
     if (body.futurePlan !== undefined) {
       const plan = futurePlanSchema.parse(body.futurePlan);

@@ -62,10 +62,26 @@ export async function setHideZeroAccounts(hide: boolean): Promise<void> {
   await setConfig("hide_zero_accounts", hide ? "1" : "0");
 }
 
-/** Ordered, persisted set of optional destinations shown in the sidebar. */
+/** Ordered, persisted sidebar ids: section ids, or page ids from older saves. */
 export async function getSidebarVisibleTabs(): Promise<string[]> {
   const value = await getConfig("sidebar_visible_tabs");
   const tabs = value.split(",").map((item) => item.trim()).filter((item) => item && item !== "next-6-months");
   // Migrate the retired destination once on read; new installs use the new defaults.
-  return value.includes("next-6-months") ? [...new Set([...tabs, "planning", "taxes", "research"])] : tabs;
+  const migrated = value.includes("next-6-months") ? [...new Set([...tabs, "planning", "taxes", "research"])] : tabs;
+  // Lists saved before the assistant existed never offered it, so show it until
+  // the user next saves their tabs. Read-only: this runs while pages prerender.
+  return (await getConfig("sidebar_assistant_offered")) === "1" ? migrated : addAssistantTab(migrated);
+}
+
+/** Save the sidebar list; from then on the user's choice about the assistant stands. */
+export async function setSidebarVisibleTabs(tabs: string[]): Promise<void> {
+  await setConfig("sidebar_visible_tabs", tabs.join(","));
+  await setConfig("sidebar_assistant_offered", "1");
+}
+
+/** Insert "assistant" right after "overview" (or first) unless already present. */
+export function addAssistantTab(tabs: string[]): string[] {
+  if (tabs.includes("assistant")) return tabs;
+  const at = tabs.indexOf("overview") + 1;
+  return [...tabs.slice(0, at), "assistant", ...tabs.slice(at)];
 }
