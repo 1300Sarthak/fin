@@ -4,13 +4,8 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { CalendarDays, Pencil, Plus, Sparkles, Trash2 } from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { ResponsiveSheet } from "@/components/kit";
+import { SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -329,11 +324,10 @@ export function CashActivityEditor({
         </div>
       )}
 
-      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit cash entry</DialogTitle>
-          </DialogHeader>
+      {/* Bottom sheet on phones (thumb reach), side sheet from tablet up. */}
+      <ResponsiveSheet open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
+        <div className="space-y-4 px-4 pt-3 pb-5 md:px-5 md:pt-5">
+          <SheetTitle className="pr-8 text-[15px] font-semibold">Edit cash entry</SheetTitle>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="edit-cash-direction">Type</Label>
@@ -384,17 +378,15 @@ export function CashActivityEditor({
                 onChange={(e) => patchEditForm({ note: e.target.value })}
                 rows={3}
                 placeholder="What was this cash for?"
-                className="border-input dark:bg-input/30 w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                className="border-input dark:bg-input/30 w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] md:text-sm"
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button onClick={saveEdit} disabled={busy}>
-              {busy ? "Saving..." : "Save entry"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          <Button onClick={saveEdit} disabled={busy} className="w-full sm:w-auto">
+            {busy ? "Saving..." : "Save entry"}
+          </Button>
+        </div>
+      </ResponsiveSheet>
     </div>
   );
 }
