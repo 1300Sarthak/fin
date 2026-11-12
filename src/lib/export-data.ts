@@ -12,7 +12,7 @@ export async function exportFinanceXlsx() {
     ["Transactions", schema.transactions], ["Category rules", schema.categoryRules], ["Merchant cache", schema.merchantCache],
     ["Balance snapshots", schema.balanceSnapshots], ["Milestones", schema.netWorthMilestones], ["Milestone lines", schema.netWorthMilestoneLines],
     ["Holdings", schema.holdings], ["Budgets", schema.budgets], ["Goals", schema.goals], ["Goal accounts", schema.goalAccounts],
-    ["Recurring series", schema.recurringSeries], ["Reminders", schema.cancellationReminders], ["Notes", schema.notes],
+    ["Recurring series", schema.recurringSeries], ["Ledger changes", schema.ledgerChanges], ["Reminders", schema.cancellationReminders], ["Notes", schema.notes],
   ] as const;
   const [tables, config, profile, uploads] = await Promise.all([
     Promise.all(definitions.map(async ([name, table]) => {
