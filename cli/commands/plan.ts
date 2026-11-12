@@ -3,12 +3,11 @@
  * what looks off.
  */
 import { bool, isoDay, num, RANGE, rowId, str, type Args } from "../args";
-import { clip, emit, heading, kv, money, pct, table } from "../render";
+import { clip, emit, heading, kv, money, table } from "../render";
 import { getUpcomingBills, getBalanceForecast, getLowBalanceWarning } from "@/lib/forecast";
 import { getRecurringSeries } from "@/lib/recurring";
 import { getEndingTrials } from "@/lib/trials";
 import { getCancellationReminders, createCancellationReminder, setCancellationReminderStatus } from "@/lib/cancellation-reminders";
-import { getGoalsTree, getMonthlyFreeCashFlow, getDebtSnowball } from "@/lib/planner";
 import { getSpendingAnomalies } from "@/lib/anomalies";
 import { getAccountsWithInstitution } from "@/lib/queries";
 
@@ -116,33 +115,8 @@ export async function reminders(a: Args, json: boolean) {
   );
 }
 
-export async function goals(_a: Args, json: boolean) {
-  const [tree, fcf, debts] = await Promise.all([getGoalsTree(), getMonthlyFreeCashFlow(), getDebtSnowball()]);
-  emit(json, { goals: tree, freeCashFlow: fcf, debts }, () =>
-    [
-      kv([["Free cash flow", `${money(fcf.estimateCents)} / month (over ${fcf.lookbackMonths} months)`]]),
-      heading("Goals"),
-      table(
-        [{ head: "GOAL" }, { head: "NOW", align: "r" }, { head: "TARGET", align: "r" }, { head: "DONE", align: "r" }, { head: "LEFT", align: "r" }],
-        tree.flatMap((g) =>
-          [g, ...g.children].map((n, i) => [
-            (i ? "  " : "") + clip(n.name, 30),
-            money(n.currentCents),
-            money(n.targetCents),
-            n.targetCents ? pct((n.currentCents / n.targetCents) * 100, 0) : "—",
-            money(Math.max(0, n.targetCents - n.currentCents)),
-          ]),
-        ),
-      ),
-      ...(debts.length
-        ? [
-            heading("Debts, smallest first"),
-            table([{ head: "NAME" }, { head: "BALANCE", align: "r" }], debts.map((d) => [clip(d.name, 30), money(d.balanceCents)])),
-          ]
-        : []),
-    ].join("\n"),
-  );
-}
+/** Lives in goals.ts (progress by kind, `set`, `rm`); re-exported so `plan.goals` keeps working. */
+export { goals } from "./goals";
 
 export async function anomalies(a: Args, json: boolean) {
   const rows = await getSpendingAnomalies(str(a, "month") ?? a._[0]);
