@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { Terminal, Sparkles, FileSpreadsheet, ShieldCheck, ArrowUpRight, Bot } from "lucide-react";
-import { PageHeader } from "@/components/page-header";
+import { ShieldCheck } from "lucide-react";
+import { Disclosure, PageHeader, Section } from "@/components/kit";
 import { CopyCommand } from "@/components/copy-command";
 // Every command on this page is exercised against the CLI; keep them in step
 // with `cli/fin.ts` rather than paraphrasing what a command probably does.
@@ -27,9 +27,9 @@ const placements = [
   { tool: "Anything else", where: "whatever file it reads at startup" },
 ];
 const workflows = [
-  { icon: Terminal, title: "Bring your own agent", detail: "Give a terminal agent the same facts you see here. Commands share the dashboard’s calculations, group themselves in `fin help`, and return structured JSON.", commands: ["bin/fin brief --json", "bin/fin burn 2026-06 2026-08 --json", "bin/fin context --json", "bin/fin help --json"] },
-  { icon: Sparkles, title: "Research with evidence", detail: "Investigate companies, compare scenarios, and use financial tools. Without --run you get a preview of the provider, the limits and the privacy terms — no request leaves the machine.", commands: ['bin/fin research "Compare VTI and a concentrated stock portfolio"', "bin/fin research tools --json", 'bin/fin research "Review my savings plan" --run --with-context --json'] },
-  { icon: FileSpreadsheet, title: "Plan with your spreadsheets", detail: "Read CSV and XLSX locally — no ledger transactions are imported. Choose sharing per file, then export a portable workbook.", commands: ["bin/fin import examples/monthly-budget.csv --json", "bin/fin spreadsheets list --json", "bin/fin plan --json", "bin/fin export --out finance-export.xlsx --json"] },
+  { title: "Bring your own agent", detail: "Give a terminal agent the same facts you see here. Commands share the dashboard’s calculations, group themselves in `fin help`, and return structured JSON.", commands: ["bin/fin brief --json", "bin/fin burn 2026-06 2026-08 --json", "bin/fin context --json", "bin/fin help --json"] },
+  { title: "Research with evidence", detail: "Investigate companies, compare scenarios, and use financial tools. Without --run you get a preview of the provider, the limits and the privacy terms — no request leaves the machine.", commands: ['bin/fin research "Compare VTI and a concentrated stock portfolio"', "bin/fin research tools --json", 'bin/fin research "Review my savings plan" --run --with-context --json'] },
+  { title: "Plan with your spreadsheets", detail: "Read CSV and XLSX locally — no ledger transactions are imported. Choose sharing per file, then export a portable workbook.", commands: ["bin/fin import examples/monthly-budget.csv --json", "bin/fin spreadsheets list --json", "bin/fin plan --json", "bin/fin export --out finance-export.xlsx --json"] },
 ];
 const guarantees = [
   ["One JSON value, one stream", "--json prints a single JSON value on stdout and nothing else, so the output pipes straight into a parser."],
@@ -37,15 +37,80 @@ const guarantees = [
   ["No silent defaults", "An unknown flag, an unknown verb, or a value outside the allowed set stops the command and names what it accepts instead."],
   ["Local by default", "Only research --run, sync, categorize and free-text cash reach the network. bin/fin doctor reports your configuration without contacting anyone."],
 ];
+/** The commands each page has a twin for; every line here runs as written against `bin/fin`. */
+const commandGroups: { title: string; rows: [string, string][] }[] = [
+  { title: "Transactions and spending", rows: [
+    ["bin/fin txns --from 2026-10-01 --to 2026-10-31 --category Groceries", "the same filter as /transactions; also --merchant, --account ID, --kind income|expense|cashflow|transfer, --source NAME"],
+    ["bin/fin spending 2026-10 --by merchant", "where the month went"],
+    ["bin/fin budgets 2026-11", "budget limits against actuals"],
+  ] },
+  { title: "Income and investments", rows: [
+    ["bin/fin income --from 2026-01 --to 2026-06 --by month", "pay per job over any range, grouped by week, month, quarter, or year"],
+    ["bin/fin activity --from 2026-01 --kind buy", "what was bought, sold, or paid in, and with what money"],
+  ] },
+  { title: "Business and taxes", rows: [
+    ['bin/fin business 2026', "Schedule C expenses and SEP room; `business add \"ITEM\" --amount X` to record one"],
+    ["bin/fin sep 2026 --w2-deferrals 23500", "SEP IRA max, SE tax, and the Solo 401(k) alternative"],
+  ] },
+  { title: "Cards, points, and travel", rows: [
+    ["bin/fin cards", "every card, its rates and fees, and what to use it for; `cards missed` for rewards left on the table"],
+    ["bin/fin card-for Restaurants --amount 40", "which card for this purchase"],
+    ["bin/fin points", "loyalty balances and what they are worth"],
+    ["bin/fin trips --upcoming", "booked and past trips; `trips add --kind hotel --provider P --title T --start D` records one"],
+    ["bin/fin points-vs-cash 104 9436 --program chase --hotel wyndham", "points in the portal vs cash in the portal vs booking direct, each net of what it earns"],
+  ] },
+];
+
 export default function GuidePage() {
-  return <div className="mx-auto max-w-5xl"><PageHeader title="Your money. Your tools." description="One financial workspace for you and the agents you choose." />
-    <div className="mb-7 rounded-2xl border bg-gradient-to-br from-positive/10 via-background to-background p-6 sm:p-8"><div className="mb-4 flex items-center gap-2 text-sm text-positive"><ShieldCheck className="size-4" /> Local-first, with explicit research sharing</div><h2 className="max-w-2xl text-3xl font-semibold tracking-tight">From a clearer picture to a practical plan.</h2><p className="mt-4 max-w-2xl text-sm leading-6 text-muted-foreground">Track cash flow, inspect holdings, model goals, and prepare tax questions. Use the site, the CLI, or your own coding agent. Financial planning stays available without AI keys.</p><div className="mt-5 flex flex-wrap gap-4 text-sm"><Link href="/planning" className="rounded-lg bg-primary px-4 py-2 text-primary-foreground">Build a plan</Link><Link href="/research" className="flex items-center gap-1 underline">Open research <ArrowUpRight className="size-4" /></Link></div></div>
-    <section className="mb-7 space-y-4 rounded-xl border p-6"><div className="flex items-center gap-2"><Bot className="size-5 text-positive" /><h2 className="text-lg font-semibold">Point your coding agent at this CLI</h2></div><p className="max-w-3xl text-sm leading-6 text-muted-foreground">The whole dashboard is also <code className="text-xs">bin/fin</code>, and it shares its calculations with these pages, so an agent driving the CLI cannot disagree with what you see here. Paste the block below into the file your agent reads at startup; it needs nothing else to work.</p>
-      <CopyCommand command={AGENT_BRIEF} />
-      <dl className="grid gap-3 text-sm sm:grid-cols-2">{placements.map(({ tool, where }) => <div key={tool} className="rounded-lg border p-3"><dt className="font-medium">{tool}</dt><dd className="mt-1 text-muted-foreground">{where}</dd></div>)}</dl>
-      <p className="text-xs leading-5 text-muted-foreground">Then let it run <code>bin/fin help</code>. Commands are grouped by what they answer, and <code>bin/fin &lt;command&gt; --help</code> lists that command’s flags and whether it touches the network.</p></section>
-    <div className="grid gap-5 lg:grid-cols-3">{workflows.map(({ icon: Icon, title, detail, commands }) => <section key={title} className="min-w-0 space-y-4 rounded-xl border p-5"><Icon className="size-5 text-positive" /><h2 className="font-semibold">{title}</h2><p className="text-sm leading-6 text-muted-foreground">{detail}</p><div className="space-y-2">{commands.map(command => <CopyCommand key={command} command={command} />)}</div></section>)}</div>
-    <section className="mt-7 space-y-4 rounded-xl border p-6"><h2 className="text-lg font-semibold">What the CLI promises an agent</h2><dl className="grid gap-4 sm:grid-cols-2">{guarantees.map(([title, detail]) => <div key={title}><dt className="text-sm font-medium">{title}</dt><dd className="mt-1 text-sm leading-6 text-muted-foreground">{detail}</dd></div>)}</dl></section>
-    <section className="mt-7 space-y-4 rounded-xl border p-6"><h2 className="text-lg font-semibold">Connect only what you need</h2><p className="text-sm leading-6 text-muted-foreground">The local dashboard, planning, tax worksheet, uploads, and Excel export need no paid service. Bank sync uses SimpleFIN. Research needs one AI provider; market data and public search are optional additions. Add keys to your local environment file and restart. Settings never displays secret values.</p><div className="flex flex-wrap gap-4 text-sm underline"><a href="https://bridge.simplefin.org/" target="_blank" rel="noreferrer">SimpleFIN bank sync</a><a href="https://console.anthropic.com/" target="_blank" rel="noreferrer">Anthropic API</a><a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">OpenAI API</a><a href="https://build.nvidia.com/" target="_blank" rel="noreferrer">NVIDIA NIM</a><a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noreferrer">Alpha Vantage</a><a href="https://dashboard.exa.ai/" target="_blank" rel="noreferrer">Exa search</a></div><CopyCommand command="bin/fin doctor --json" /><p className="text-xs leading-5 text-muted-foreground">Research sends your prompt to your selected provider. Private context requires a per-run choice; planning inputs and spreadsheets require their own sharing switches too. Enabling AI categorization or cash parsing can send transaction details to configured providers. Keep this single-owner app on localhost or behind your own authenticated private network.</p></section>
-  </div>;
+  return <>
+    <PageHeader title="CLI & agent guide" description="The whole dashboard is also bin/fin, sharing these pages' calculations, so an agent driving it cannot disagree with what you see." />
+
+    <section className="bg-card rounded-2xl border p-5 md:p-6">
+      <div className="text-positive flex items-center gap-2 text-[13px] font-medium"><ShieldCheck className="size-4" aria-hidden="true" />Local-first, with explicit research sharing</div>
+      <h2 className="mt-2 max-w-2xl text-xl font-semibold tracking-[-0.02em]">Point your coding agent at this CLI</h2>
+      <p className="text-muted-foreground mt-2 max-w-3xl text-sm leading-6">Track cash flow, inspect holdings, model goals, and prepare tax questions from the site, the CLI, or your own coding agent; financial planning stays available without AI keys (<Link className="text-brand hover:underline" href="/planning">build a plan</Link>, <Link className="text-brand hover:underline" href="/research">open research</Link>). Paste the block below into the file your agent reads at startup; it needs nothing else to work.</p>
+      <div className="mt-4"><CopyCommand command={AGENT_BRIEF} /></div>
+      <dl className="mt-4 grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-2">{placements.map(({ tool, where }) => <div key={tool} className="flex gap-2"><dt className="font-medium">{tool}</dt><dd className="text-muted-foreground">{where}</dd></div>)}</dl>
+      <p className="text-muted-foreground mt-3 text-xs leading-5">Then let it run <code>bin/fin help</code>. Commands are grouped by what they answer, and <code>bin/fin &lt;command&gt; --help</code> lists that command’s flags and whether it touches the network.</p>
+    </section>
+
+    <Section className="mt-10" title="Commands by question" description="Each one is a page here, as a command. Add --json to any of them." surface>
+      <div className="divide-y">
+        {commandGroups.map((g) => (
+          <div key={g.title} className="px-4 py-4 md:px-5">
+            <h3 className="text-[13px] font-semibold">{g.title}</h3>
+            <ul className="mt-2 space-y-2.5">
+              {g.rows.map(([cmd, what]) => (
+                <li key={cmd} className="grid gap-1 md:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] md:items-center md:gap-4">
+                  <CopyCommand command={cmd} />
+                  <span className="text-muted-foreground text-[13px] leading-5">{what}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </Section>
+
+    <div className="mt-10 grid grid-cols-1 gap-10 lg:grid-cols-3 lg:gap-8">
+      {workflows.map(({ title, detail, commands }) => (
+        <Section key={title} title={title} description={detail}>
+          <div className="space-y-2">{commands.map((command) => <CopyCommand key={command} command={command} />)}</div>
+        </Section>
+      ))}
+    </div>
+
+    <Section className="mt-10" title="What the CLI promises an agent" surface>
+      <dl className="grid gap-x-6 gap-y-4 p-4 sm:grid-cols-2 md:p-5">{guarantees.map(([title, detail]) => <div key={title}><dt className="text-sm font-medium">{title}</dt><dd className="text-muted-foreground mt-1 text-[13px] leading-6">{detail}</dd></div>)}</dl>
+    </Section>
+
+    <Disclosure className="mt-8" summary="Connect only what you need">
+      <div className="max-w-3xl space-y-3">
+        <p className="text-muted-foreground text-[13px] leading-6">The local dashboard, planning, tax worksheet, uploads, and Excel export need no paid service. Bank sync uses SimpleFIN. Research needs one AI provider; market data and public search are optional additions. Add keys to your local environment file and restart. Settings never displays secret values.</p>
+        <div className="text-brand flex flex-wrap gap-x-4 gap-y-2 text-[13px]"><a className="hover:underline" href="https://bridge.simplefin.org/" target="_blank" rel="noreferrer">SimpleFIN bank sync</a><a className="hover:underline" href="https://console.anthropic.com/" target="_blank" rel="noreferrer">Anthropic API</a><a className="hover:underline" href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">OpenAI API</a><a className="hover:underline" href="https://build.nvidia.com/" target="_blank" rel="noreferrer">NVIDIA NIM</a><a className="hover:underline" href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noreferrer">Alpha Vantage</a><a className="hover:underline" href="https://dashboard.exa.ai/" target="_blank" rel="noreferrer">Exa search</a></div>
+        <CopyCommand command="bin/fin doctor --json" />
+        <p className="text-muted-foreground text-xs leading-5">Research sends your prompt to your selected provider. Private context requires a per-run choice; planning inputs and spreadsheets require their own sharing switches too. Enabling AI categorization or cash parsing can send transaction details to configured providers. Keep this single-owner app on localhost or behind your own authenticated private network.</p>
+      </div>
+    </Disclosure>
+  </>;
 }
