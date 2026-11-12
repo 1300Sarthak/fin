@@ -642,3 +642,19 @@ export const creditCards = sqliteTable("credit_cards", {
   updatedAt: integer({ mode: "timestamp" }).notNull().default(now),
 });
 
+/**
+ * Spending envelopes that span categories: "Food" = Food & Dining (and its
+ * children) + Groceries; a catch-all group covers every expense category not
+ * claimed by another group. `categoryIdsJson` lists top-level or child
+ * category ids; a parent id includes its children.
+ */
+export const budgetGroups = sqliteTable("budget_groups", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  name: text().notNull().unique(),
+  limitCents: integer().notNull(),
+  period: text().notNull().default("monthly"),
+  categoryIdsJson: text().notNull().default("[]"),
+  catchAll: integer({ mode: "boolean" }).notNull().default(false),
+  sortOrder: integer().notNull().default(0),
+  createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+});
