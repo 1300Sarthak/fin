@@ -6,23 +6,18 @@ import { Keyboard, Moon, PanelLeft, Search, Sun } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme-provider";
-import { CORE_NAV_ITEMS, NAV_ITEMS, setSidebarCollapsed } from "@/components/app-sidebar";
+import { setSidebarCollapsed } from "@/components/app-sidebar";
+import { ALL_PAGES } from "@/components/kit/nav";
 import { cn } from "@/lib/utils";
 
 type Item = {
   id: string;
   label: string;
   hint?: string;
+  keywords?: string;
   icon: React.ComponentType<{ className?: string }>;
   run: () => void;
 };
-
-/** Pages the sidebar can hide are still reachable here, which is half the point. */
-const PAGES = [
-  ...NAV_ITEMS.map((i) => ({ href: i.href, label: i.label, icon: i.icon })),
-  { href: "/history", label: "History", icon: NAV_ITEMS[0].icon },
-  ...CORE_NAV_ITEMS.map((i) => ({ href: i.href, label: i.label, icon: i.icon })),
-];
 
 const SHORTCUTS = [
   { keys: ["⌘/Ctrl", "K"], label: "Open the command menu" },
@@ -69,10 +64,12 @@ export function CommandMenu() {
   );
 
   const items = React.useMemo<Item[]>(() => {
-    const pages: Item[] = PAGES.map((p) => ({
+    // Every page, including ones in hidden sections; that is half the point.
+    const pages: Item[] = ALL_PAGES.map((p) => ({
       id: `page:${p.href}`,
       label: p.label,
       hint: p.href,
+      keywords: p.section,
       icon: p.icon,
       run: () => router.push(p.href),
     }));
@@ -105,7 +102,7 @@ export function CommandMenu() {
   const results = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((i) => `${i.label} ${i.hint ?? ""}`.toLowerCase().includes(q));
+    return items.filter((i) => `${i.label} ${i.hint ?? ""} ${i.keywords ?? ""}`.toLowerCase().includes(q));
   }, [items, query]);
 
   const open = (next: "menu" | "shortcuts") => {

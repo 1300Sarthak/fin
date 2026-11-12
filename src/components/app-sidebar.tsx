@@ -3,39 +3,11 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowLeftRight, Banknote, BellRing, CalendarClock, ChevronLeft, ChevronRight, CircleDollarSign, Landmark, LayoutDashboard, PieChart, ReceiptText, Repeat, Settings, Target, TrendingUp, Wallet, Route, Sparkles, Terminal, FileCheck2 } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FOOTER_LINKS, isActivePath, locate, sectionHref, visibleSections, type NavSection } from "@/components/kit/nav";
 
-export const NAV_ITEMS = [
-  { id: "overview", href: "/", label: "Overview", icon: LayoutDashboard },
-  { id: "accounts", href: "/accounts", label: "Accounts", icon: Wallet },
-  { id: "cash", href: "/cash", label: "Cash", icon: Banknote },
-  { id: "transactions", href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
-  { id: "spending", href: "/spending", label: "Spending", icon: PieChart },
-  { id: "earnings", href: "/earnings", label: "Earnings", icon: TrendingUp },
-  { id: "investments", href: "/investments", label: "Investments", icon: Landmark },
-  { id: "holdings", href: "/holdings", label: "Holdings", icon: Landmark },
-  { id: "transfers", href: "/transfers", label: "Transfers", icon: CircleDollarSign },
-  { id: "refunds", href: "/refunds", label: "Refunds", icon: ReceiptText },
-  { id: "upcoming", href: "/upcoming", label: "Upcoming", icon: CalendarClock },
-  { id: "recurring", href: "/recurring", label: "Recurring", icon: Repeat },
-  { id: "reminders", href: "/reminders", label: "Reminders", icon: BellRing },
-  { id: "goals", href: "/goals", label: "Goals", icon: Target },
-  { id: "future-plan", href: "/future-plan", label: "Future plan", icon: Route },
-  { id: "planning", href: "/planning", label: "Financial planning", icon: Route },
-  { id: "taxes", href: "/taxes", label: "Taxes & write-offs", icon: FileCheck2 },
-  { id: "research", href: "/research", label: "Research & advice", icon: Sparkles },
-] as const;
-export const CORE_NAV_ITEMS = [{ href: "/guide", label: "CLI & agent guide", icon: Terminal }, { href: "/settings", label: "Settings", icon: Settings }] as const;
-
-export function isActivePath(pathname: string, href: string): boolean {
-  return href === "/" ? pathname === "/" : (pathname === href || pathname.startsWith(`${href}/`));
-}
-
-export function visibleNavigation(visibleTabs: string[]) {
-  const visible = new Set(visibleTabs);
-  return NAV_ITEMS.filter((item) => visible.has(item.id));
-}
+export { isActivePath };
 
 function readSidebar() { try { return localStorage.getItem("finance-sidebar-collapsed") === "true"; } catch { return false; } }
 function subscribeSidebar(listener: () => void) { window.addEventListener("storage", listener); window.addEventListener("finance-sidebar", listener); return () => { window.removeEventListener("storage", listener); window.removeEventListener("finance-sidebar", listener); }; }
@@ -47,41 +19,86 @@ export function setSidebarCollapsed(value: boolean | "toggle") {
   window.dispatchEvent(new Event("finance-sidebar"));
 }
 
-export function AppSidebar({ visibleTabs }: { visibleTabs: string[] }) {
+const itemClass = (active: boolean, collapsed: boolean) => cn(
+  "group/item relative flex h-9 items-center rounded-md text-[13.5px] font-medium outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+  collapsed ? "justify-center px-0" : "gap-2.5 px-2.5",
+  active ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
+);
+
+/** One list for both the desktop rail and the phone sheet. */
+export function SectionList({ sections, collapsed = false, onNavigate }: { sections: NavSection[]; collapsed?: boolean; onNavigate?: () => void }) {
   const pathname = usePathname();
+  const current = locate(pathname)?.section.id;
+  return (
+    <ul className="space-y-0.5">
+      {sections.map((section) => {
+        const active = section.id === current;
+        const Icon = section.icon;
+        return (
+          <li key={section.id}>
+            <Link href={sectionHref(section)} onClick={onNavigate} title={collapsed ? section.label : undefined} aria-label={collapsed ? section.label : undefined} aria-current={active ? "page" : undefined} className={itemClass(active, collapsed)}>
+              {active && <span aria-hidden="true" className="drop-in bg-brand absolute top-2 bottom-2 -left-2 w-[3px] rounded-r-full" />}
+              <Icon className={cn("size-4 shrink-0 transition-colors", active ? "text-brand" : "text-muted-foreground group-hover/item:text-sidebar-foreground")} aria-hidden="true" />
+              {!collapsed && <span className="truncate">{section.label}</span>}
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+export function FooterList({ collapsed = false, onNavigate }: { collapsed?: boolean; onNavigate?: () => void }) {
+  const pathname = usePathname();
+  return (
+    <ul className="space-y-0.5">
+      {FOOTER_LINKS.map(({ href, label, icon: Icon }) => {
+        const active = isActivePath(pathname, href);
+        return (
+          <li key={href}>
+            <Link href={href} onClick={onNavigate} title={collapsed ? label : undefined} aria-label={collapsed ? label : undefined} aria-current={active ? "page" : undefined} className={itemClass(active, collapsed)}>
+              <Icon className="size-4 shrink-0" aria-hidden="true" />
+              {!collapsed && <span className="truncate">{label}</span>}
+            </Link>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+export function BrandMark({ className }: { className?: string }) {
+  return <span aria-hidden="true" className={cn("bg-foreground text-background grid size-7 shrink-0 place-items-center rounded-[7px] text-[13px] font-bold", className)}>$</span>;
+}
+
+export function AppSidebar({ visibleTabs }: { visibleTabs: string[] }) {
   const collapsed = React.useSyncExternalStore(subscribeSidebar, readSidebar, () => false);
-  const setCollapsed = setSidebarCollapsed;
-  const items = visibleNavigation(visibleTabs);
+  const sections = visibleSections(visibleTabs);
+  const Toggle = collapsed ? PanelLeftOpen : PanelLeftClose;
 
   return (
-    <aside id="app-sidebar" className={cn("bg-sidebar text-sidebar-foreground sticky top-0 h-screen hidden shrink-0 flex-col border-r transition-[width] duration-200 ease-out motion-reduce:transition-none md:flex", collapsed ? "w-16" : "w-60")} aria-label="Primary navigation">
-      <div className={cn("flex h-16 items-center border-b", collapsed ? "justify-center px-2" : "gap-2.5 px-5")}>
-        <Link href="/" className="flex min-w-0 items-center gap-2.5" aria-label="Finance overview">
-          <span className="bg-primary text-primary-foreground grid size-8 shrink-0 place-items-center rounded-lg text-sm font-bold">$</span>
-          {!collapsed && <span className="truncate text-base font-semibold tracking-tight">Finance</span>}
+    <aside id="app-sidebar" className={cn("bg-sidebar text-sidebar-foreground sticky top-0 hidden h-screen shrink-0 flex-col border-r border-sidebar-border transition-[width] duration-200 ease-out motion-reduce:transition-none md:flex", collapsed ? "w-[60px]" : "w-56")} aria-label="Primary navigation">
+      <div className={cn("flex h-14 shrink-0 items-center", collapsed ? "justify-center px-2" : "justify-between pr-2 pl-4")}>
+        <Link href="/" className="flex min-w-0 items-center gap-2.5 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring" aria-label="Finance overview">
+          <BrandMark />
+          {!collapsed && <span className="truncate text-[15px] font-semibold tracking-tight">Finance</span>}
         </Link>
+        {!collapsed && (
+          <button type="button" onClick={() => setSidebarCollapsed(true)} className="text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground grid size-8 place-items-center rounded-md transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring" aria-controls="app-sidebar" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar  [">
+            <Toggle className="size-4" aria-hidden="true" />
+          </button>
+        )}
       </div>
-      <nav className="flex-1 space-y-1 overflow-y-auto p-2">
-        {items.map(({ href, label, icon: Icon }) => {
-          const active = isActivePath(pathname, href);
-          return <Link key={href} href={href} aria-label={label} title={collapsed ? label : undefined} aria-current={active ? "page" : undefined} className={cn("flex min-h-11 items-center rounded-lg text-sm font-medium transition-colors duration-150 motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-sidebar-ring", collapsed ? "justify-center px-2" : "gap-3 px-3", active ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground")}>
-            <Icon className="size-4 shrink-0" aria-hidden="true" />
-            {!collapsed && <span className="truncate">{label}</span>}
-          </Link>;
-        })}
+      <nav aria-label="Sections" className="scroll-quiet flex-1 overflow-y-auto px-2 pt-2 pb-4">
+        <SectionList sections={sections} collapsed={collapsed} />
       </nav>
-      <div className="space-y-1 border-t p-2">
-        {CORE_NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const active = isActivePath(pathname, href);
-          return <Link key={href} href={href} aria-label={label} title={collapsed ? label : undefined} aria-current={active ? "page" : undefined} className={cn("flex min-h-11 items-center rounded-lg text-sm font-medium transition-colors duration-150 motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-sidebar-ring", collapsed ? "justify-center px-2" : "gap-3 px-3", active ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-foreground")}>
-            <Icon className="size-4 shrink-0" aria-hidden="true" />
-            {!collapsed && <span>{label}</span>}
-          </Link>;
-        })}
-        <button type="button" onClick={() => setCollapsed(!collapsed)} className={cn("text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground flex min-h-11 w-full items-center rounded-lg transition-colors duration-150 motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-sidebar-ring", collapsed ? "justify-center px-2" : "gap-3 px-3")} aria-controls="app-sidebar" aria-expanded={!collapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
-          {collapsed ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
-          {!collapsed && <span className="text-sm font-medium">Collapse</span>}
-        </button>
+      <div className="border-sidebar-border space-y-0.5 border-t p-2">
+        <FooterList collapsed={collapsed} />
+        {collapsed && (
+          <button type="button" onClick={() => setSidebarCollapsed(false)} className={itemClass(false, true) + " w-full"} aria-controls="app-sidebar" aria-expanded="false" aria-label="Expand sidebar" title="Expand sidebar  [">
+            <Toggle className="size-4" aria-hidden="true" />
+          </button>
+        )}
       </div>
     </aside>
   );
