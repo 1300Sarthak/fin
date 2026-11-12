@@ -502,3 +502,119 @@ export type NewNetWorthMilestoneLine = typeof netWorthMilestoneLines.$inferInser
 export type LedgerChange = typeof ledgerChanges.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type NewNote = typeof notes.$inferInsert;
+
+/* ------------------------ income, business, travel -------------------------- */
+
+/**
+ * Where money is earned. `matchPattern` is a case-insensitive substring of the
+ * transaction description; deposits that match are attributed to the source,
+ * so W-2 pay needs no manual entries at all. `taxTreatment` decides
+ * which tax form the income lands on: w2 is already withheld, se is 1099 or
+ * other self-employment income (Schedule C, SE tax, SEP room), nontaxable is
+ * tracked but never taxed.
+ */
+export const incomeSourceTreatment = ["w2", "se", "nontaxable"] as const;
+export const incomeSources = sqliteTable("income_sources", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  name: text().notNull().unique(),
+  taxTreatment: text({ enum: incomeSourceTreatment }).notNull().default("se"),
+  matchPattern: text(),
+  hourlyRateCents: integer(),
+  note: text(),
+  archived: integer({ mode: "boolean" }).notNull().default(false),
+  createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+});
+
+/**
+ * Work logged against a source: hours or a flat amount for a period of work,
+ * and when (and through which deposit) it was paid. `workMonth` is the month
+ * the work happened ("YYYY-MM"); `paidOn` is when the money landed. Taxable
+ * defaults to the source's treatment but can be overridden per entry (a
+ * nontaxable stipend from an otherwise 1099 payer).
+ */
+export const incomeEntries = sqliteTable(
+  "income_entries",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    sourceId: integer().notNull().references(() => incomeSources.id, { onDelete: "cascade" }),
+    workMonth: text(), // "YYYY-MM"
+    workDate: text(), // "YYYY-MM-DD", optional finer grain
+    hours: real(),
+    rateCents: integer(),
+    amountCents: integer().notNull(),
+    taxable: integer({ mode: "boolean" }),
+    paidOn: text(), // "YYYY-MM-DD"
+    txnId: integer(), // the deposit that paid it, when known
+    note: text(),
+    createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+  },
+  (t) => [index("income_entries_source_idx").on(t.sourceId), index("income_entries_txn_idx").on(t.txnId)],
+);
+
+/**
+ * Business (Schedule C) expenses. `businessPct` is 0-100; the deductible
+ * amount is amountCents * businessPct / 100. `datePurchased` may be a range
+ * label ("2026-03..2026-12") for subscriptions, so it stays text; `taxYear`
+ * is the year it is claimed in.
+ */
+export const businessExpenses = sqliteTable(
+  "business_expenses",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    taxYear: integer().notNull(),
+    datePurchased: text(),
+    item: text().notNull(),
+    amountCents: integer(), // null = price still unknown
+    paymentMethod: text(),
+    businessPct: integer().notNull().default(100),
+    category: text(), // e.g. equipment, software, furniture
+    txnId: integer(),
+    note: text(),
+    createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+  },
+  (t) => [index("business_expenses_year_idx").on(t.taxYear)],
+);
+
+/**
+ * Points and loyalty accounts: card currencies (Chase Ultimate Rewards) and
+ * airline/hotel programs. Member numbers are stored as last 4 only.
+ * `valueCentsPerPoint` is a hundredths-of-a-cent valuation (110 = 1.10c).
+ */
+export const loyaltyKind = ["card", "airline", "hotel", "other"] as const;
+export const loyaltyPrograms = sqliteTable("loyalty_programs", {
+  id: integer().primaryKey({ autoIncrement: true }),
+  name: text().notNull().unique(),
+  kind: text({ enum: loyaltyKind }).notNull(),
+  balance: integer().notNull().default(0),
+  statusTier: text(),
+  memberLast4: text(),
+  valueCentsPerPoint: integer(), // hundredths of a cent
+  note: text(),
+  balanceAsOf: text(), // "YYYY-MM-DD"
+  updatedAt: integer({ mode: "timestamp" }).notNull().default(now),
+});
+
+/** Booked or past travel: flights, hotels, cars. Imported from email or typed in. */
+export const tripKind = ["flight", "hotel", "car", "other"] as const;
+export const tripBookings = sqliteTable(
+  "trip_bookings",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    kind: text({ enum: tripKind }).notNull(),
+    provider: text().notNull(), // airline / hotel brand / rental company
+    programId: integer().references(() => loyaltyPrograms.id, { onDelete: "set null" }),
+    title: text().notNull(), // "SJC → LAX", "La Quinta Springfield"
+    startDate: text().notNull(), // "YYYY-MM-DD"
+    endDate: text(),
+    location: text(),
+    costCents: integer(),
+    pointsUsed: integer(),
+    bookedVia: text(), // direct | chase travel | expedia | ...
+    status: text().notNull().default("booked"), // booked | completed | cancelled
+    note: text(),
+    source: text().notNull().default("manual"), // manual | gmail
+    createdAt: integer({ mode: "timestamp" }).notNull().default(now),
+  },
+  (t) => [index("trip_bookings_start_idx").on(t.startDate)],
+);
+
