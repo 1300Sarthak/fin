@@ -5,18 +5,21 @@
  * account can be fully funded and still sit in a settlement fund, earning
  * nothing. The cash line is printed first for that reason.
  */
-import { num, RANGE, str, type Args } from "../args";
-import { emit, heading, kv, money, pct, table } from "../render";
-import { getHoldings, getPortfolioSummary, isCashLike } from "@/lib/holdings";
+import { bool, num, pick, RANGE, str, type Args } from "../args";
+import { clip, emit, heading, kv, money, pct, table } from "../render";
+import { getHoldings, getInvestmentValueGap, getPortfolioSummary, investmentValueGapNote, isCashLike } from "@/lib/holdings";
+import { getInvestmentHistory, HISTORY_KINDS } from "@/lib/investment-history";
+import { rangeDay } from "@/lib/income";
 
 const signedPct = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`);
 
 export async function holdings(a: Args, json: boolean) {
   const accountId = num(a, "account", RANGE.id);
   const symbol = str(a, "symbol")?.toUpperCase();
-  const [rows, sum] = await Promise.all([
+  const [rows, sum, gap] = await Promise.all([
     getHoldings(accountId),
     getPortfolioSummary(accountId),
+    getInvestmentValueGap(),
   ]);
   const shown = symbol ? rows.filter((r) => r.symbol?.toUpperCase() === symbol) : rows;
 
@@ -34,6 +37,7 @@ export async function holdings(a: Args, json: boolean) {
         : `account ${accountId}`,
     symbolsHeld: [...new Set(rows.map((r) => r.symbol).filter((s): s is string => !!s))],
     summary: sum,
+    valueGap: gap,
     holdings: shown,
   };
 
@@ -48,13 +52,15 @@ export async function holdings(a: Args, json: boolean) {
     }
     const out = [
       kv([
-        [symbol ? "Total (whole portfolio)" : "Total", money(sum.totalCents)],
+        [symbol ? "Positions (whole portfolio)" : "Positions total", money(sum.totalCents)],
         ["Invested", money(sum.investedCents)],
         ["Cash / money market", `${money(sum.cashCents)}  (${pct(sum.cashPct)})`],
-        ["Positions", String(sum.positions)],
+        ["Position count", String(sum.positions)],
         ["Priced", sum.asOf ? sum.asOf.toISOString().slice(0, 10) : "—"],
       ]),
     ];
+    // Ties this total to the Investments headline, which is account balances incl. cash.
+    if (accountId == null) out.push(investmentValueGapNote(gap, money));
     if (sum.cashPct >= 20) {
       out.push(`\n${money(sum.cashCents)} (${pct(sum.cashPct)}) is sitting in cash, not invested.`);
     }
@@ -85,6 +91,7 @@ export async function holdings(a: Args, json: boolean) {
             { head: "SHARES", align: "r" },
             { head: "COST/SH", align: "r" },
             { head: "GAIN", align: "r" },
+            { head: "GAIN $", align: "r" },
           ],
           acctRows.map((x) => [
             isCashLike(x.symbol, x.description) ? `${x.symbol ?? "CASH"} *` : x.symbol ?? "—",
@@ -94,11 +101,77 @@ export async function holdings(a: Args, json: boolean) {
             x.shares.toFixed(4).replace(/\.?0+$/, ""),
             x.costPerShareCents ? money(x.costPerShareCents) : "—",
             signedPct(x.gainPct),
+            x.gainCents == null ? "—" : money(x.gainCents),
           ]),
         ),
       );
     }
     out.push("\n* held in cash / money market");
+    return out.join("\n");
+  });
+}
+
+/**
+ * `fin activity` — what was bought, sold, paid in and taken out of the
+ * investment accounts, when, and with what money. Every inferred line says so;
+ * what the feed cannot tell (shares, price, lots) prints as "?".
+ */
+export async function activity(a: Args, json: boolean) {
+  if (a._.length) throw new Error(`fin activity takes no positional arguments, got "${a._.join(" ")}"`);
+  const from = str(a, "from"), to = str(a, "to");
+  const data = await getInvestmentHistory({
+    accountId: num(a, "account", RANGE.id),
+    symbol: str(a, "symbol"),
+    kind: pick(a, "kind", HISTORY_KINDS),
+    from: from ? rangeDay(from, "start") : undefined,
+    to: to ? rangeDay(to, "end") : undefined,
+    includeInternal: bool(a, "all"),
+  });
+  const limit = num(a, "limit", RANGE.limit);
+  emit(json, data, () => {
+    const out: string[] = [];
+    const shown = limit ? data.events.slice(0, limit) : data.events;
+    if (!shown.length) out.push("No investment activity matches.");
+    else {
+      out.push(heading(`activity, newest first (${data.events.length}${data.hiddenInternal ? `; ${data.hiddenInternal} sweep/duplicate rows hidden, --all shows them` : ""})`));
+      out.push(table(
+        [{ head: "DATE" }, { head: "ACCOUNT" }, { head: "KIND" }, { head: "SECURITY" }, { head: "AMOUNT", align: "r" }, { head: "HOW / WHERE" }, { head: "TXN", align: "r" }],
+        shown.map((e) => [
+          e.date, clip(e.account, 22), e.kind + (e.confidence === "inferred" ? "?" : "") + (e.internal ? " (internal)" : ""),
+          clip(e.symbol ?? e.security ?? "?", 26), money(e.amountCents),
+          clip((e.fundedBy ?? e.sentTo)?.label ?? "", 44), e.txnId,
+        ]),
+      ));
+    }
+    const syms = data.symbols.filter((s) => s.buys || s.sells);
+    if (syms.length) {
+      out.push(heading("by security (ledger buys/sells, valued at today's holdings)"));
+      out.push(table(
+        [{ head: "SECURITY" }, { head: "FIRST BUY" }, { head: "BUYS", align: "r" }, { head: "INVESTED", align: "r" }, { head: "SOLD", align: "r" }, { head: "SHARES", align: "r" }, { head: "VALUE", align: "r" }, { head: "LEDGER GAIN", align: "r" }],
+        syms.map((s) => [
+          clip(s.symbol ? `${s.symbol} ${s.security ?? ""}` : s.security ?? s.key, 30), s.firstBought ?? "?", s.buys, money(s.investedCents), s.proceedsCents ? money(s.proceedsCents) : "",
+          s.shares != null ? s.shares.toFixed(4).replace(/\.?0+$/, "") : "—", s.currentValueCents != null ? money(s.currentValueCents) : "—",
+          s.ledgerGainCents != null ? money(s.ledgerGainCents) : "",
+        ]),
+      ));
+    }
+    const accts = data.accounts.filter((x) => x.events);
+    if (accts.length) {
+      out.push(heading("by account"));
+      out.push(table(
+        [{ head: "ID", align: "r" }, { head: "ACCOUNT" }, { head: "SINCE" }, { head: "CONTRIB", align: "r" }, { head: "IN", align: "r" }, { head: "OUT", align: "r" }, { head: "BOUGHT", align: "r" }, { head: "SOLD", align: "r" }, { head: "DIV+INT", align: "r" }, { head: "FEES", align: "r" }],
+        accts.map((x) => [x.accountId, clip(x.account, 26), x.firstActivity ?? "", money(x.contributionCents), money(x.transferInCents), money(x.transferOutCents), money(x.boughtCents), money(x.soldCents), money(x.dividendCents + x.interestCents), money(x.feeCents)]),
+      ));
+    }
+    if (data.funding.length) {
+      out.push(heading("where the money came from (contributions and deposits)"));
+      out.push(table(
+        [{ head: "ACCOUNT" }, { head: "FROM" }, { head: "COUNT", align: "r" }, { head: "AMOUNT", align: "r" }],
+        data.funding.map((f) => [clip(f.account, 26), clip(f.label + (f.inferred ? " (inferred)" : ""), 56), f.count, money(f.amountCents)]),
+      ));
+    }
+    out.push("\n  ? after a kind = read from a bare payee name and the sign, not stated by the institution.");
+    out.push(kv(data.limits.map((l, i) => [`limit ${i + 1}`, l] as [string, string])));
     return out.join("\n");
   });
 }
