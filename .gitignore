@@ -84,3 +84,8 @@ docs/screenshots/*
 !docs/screenshots/settings.png
 !docs/screenshots/upcoming.png
 !docs/screenshots/dark-mode.png
+
+/attachments/
+
+# Seeds with real personal data; kept local, never published.
+/scripts/local/

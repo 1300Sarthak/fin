@@ -13,7 +13,7 @@
     "db:reset": "rm -f finance.db finance.db-* && bun run db:migrate && bun run db:seed",
     "db:wipe": "bun run scripts/wipe-data.ts",
     "db:studio": "drizzle-kit studio",
-    "sync": "bun run scripts/sync.ts",
+    "sync": "bun --conditions react-server scripts/sync.ts",
     "refunds:detect": "bun run scripts/detect-refunds.ts",
     "fin": "bun --conditions react-server cli/fin.ts",
     "test": "bun test",
