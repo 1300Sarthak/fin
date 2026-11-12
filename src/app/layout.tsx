@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider, THEME_INIT_SCRIPT } from "@/components/theme-provider";
@@ -15,7 +16,6 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 export const metadata: Metadata = {
   title: "Finance Dashboard",
   description: "Private, local-first dashboard for all your accounts.",
-  // Installed to the iPhone home screen from /m.
   appleWebApp: { capable: true, title: "Finance", statusBarStyle: "black-translucent" },
   icons: {
     icon: [{ url: "/icons/favicon-32.png", sizes: "32x32", type: "image/png" }],
@@ -31,7 +31,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
   ],
   width: "device-width",
   initialScale: 1,
@@ -41,7 +41,10 @@ export const viewport: Viewport = {
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const visibleTabs = await getSidebarVisibleTabs();
+  // proxy.ts sets x-fin-bare=1 only on /login (and overwrites any client value),
+  // so the signed-out page never server-renders the shell, nav, or sync status.
+  const bare = (await headers()).get("x-fin-bare") === "1";
+  const visibleTabs = bare ? [] : await getSidebarVisibleTabs();
   return (
     <html
       lang="en"
@@ -55,17 +58,19 @@ export default async function RootLayout({
       {/* Extensions may annotate body before React hydrates; suppression is one level only. */}
       <body className="min-h-full" suppressHydrationWarning>
         <ThemeProvider>
+          {bare ? children : <>
           <a href="#main-content" className="skip-link">Skip to content</a>
           <div className="flex min-h-screen">
             <AppSidebar visibleTabs={visibleTabs} />
             <div className="flex min-w-0 flex-1 flex-col">
               <TopBar visibleTabs={visibleTabs} />
               {process.env.FINANCE_DEMO === "1" && <div className="border-b bg-positive/10 px-6 py-2 text-center text-xs font-medium">DEMO · Fictional household · No real accounts or personal finances</div>}
-              <main id="main-content" tabIndex={-1} className="flex-1 p-4 md:p-6">{children}</main>
+              <main id="main-content" tabIndex={-1} className="mx-auto w-full max-w-[1320px] flex-1 px-4 pt-6 pb-24 outline-none md:px-8 md:pt-8">{children}</main>
             </div>
           </div>
-          <Toaster richColors position="top-right" />
           <ChatWidget />
+          </>}
+          <Toaster richColors position="top-right" />
         </ThemeProvider>
       </body>
     </html>
