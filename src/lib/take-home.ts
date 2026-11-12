@@ -343,3 +343,209 @@ export function reconstructPayroll(paychecks: Paycheck[], a: PayrollAssumptions,
   };
 }
 export type Payroll = ReturnType<typeof reconstructPayroll>;
+
+/* --------------------------------- inputs --------------------------------- */
+
+const cents = z.number().int().min(0).max(1_000_000_000);
+const day = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, "date must be YYYY-MM-DD");
+/** The assumptions behind the estimate, saved beside the tax profile (app_config). Every derived number can be overridden here. */
+export const takeHomeInputsSchema = z.object({
+  annualSalaryCents: cents.default(11_000_000),
+  /** When salaried pay began; checks from two weeks after it are compared with salary ÷ periods. */
+  fullTimeStart: day.nullable().default(null),
+  periods: z.number().int().min(1).max(52).default(26),
+  /** California DE 4 allowances (W-4 default for CA is 1 when no DE 4 is filed). */
+  caAllowances: z.number().int().min(0).max(20).default(1),
+  k401Type: z.enum(["pretax", "roth"]).default("pretax"),
+  /** Your 401(k) election as % of pay; null = the median observed on complete full-time checks. */
+  k401Pct: z.number().min(0).max(100).nullable().default(null),
+  /** True when HSA money is taken pre-tax through payroll; false when it is a split of net pay. */
+  hsaPayroll: z.boolean().default(false),
+  projectRest: z.boolean().default(true),
+  /** From a pay stub: gross pay year to date and its date. Replaces the reconstruction up to that date. */
+  ytdGrossCents: cents.nullable().default(null),
+  ytdAsOf: day.nullable().default(null),
+  /** Year-total pre-tax 401(k) deferrals; null = from the ledger. */
+  pretaxDeferralsCents: cents.nullable().default(null),
+  /** Withholding from a pay stub or W-2 (Box 2 / Box 17); null = the model's estimate. */
+  federalWithheldCents: cents.nullable().default(null),
+  caWithheldCents: cents.nullable().default(null),
+  /** More taxable 1099 income you expect before Dec 31, on top of what is logged. */
+  expectedSeCents: cents.default(0),
+});
+export type TakeHomeInputs = z.infer<typeof takeHomeInputsSchema>;
+export const takeHomePatchSchema = takeHomeInputsSchema.partial().strict();
+
+export const TAKE_HOME_DISCLAIMER = "Planning illustration for 2026, not tax advice or a return. Federal ordinary income tax, FICA, SE tax, California income tax and SDI only; excludes credits, AMT, capital gains, local taxes and CA exemption-credit phase-outs. Withholding is modelled, not read from pay stubs. Confirm with a qualified tax professional.";
+
+/* --------------------------------- loader --------------------------------- */
+
+export const TAKE_HOME_KEY = "take_home_v1";
+export const LIMITS_2026 = {
+  rothIraCents: requireLimit("ira", 2026), k402gCents: requireLimit("k402g", 2026), hsaSelfCents: requireLimit("hsa_self", 2026),
+  sources: [TAX_SOURCES[2], TAX_SOURCES[3]],
+} as const;
+
+export async function getTakeHomeInputs(): Promise<TakeHomeInputs> {
+  const { db } = await import("@/db");
+  const { appConfig } = await import("@/db/schema");
+  const { eq } = await import("drizzle-orm");
+  const row = await db.select().from(appConfig).where(eq(appConfig.key, TAKE_HOME_KEY)).get();
+  const stored = row ? (() => { try { return JSON.parse(row.value) as Record<string, unknown>; } catch { return {}; } })() : {};
+  const parsed = takeHomeInputsSchema.safeParse(stored);
+  return parsed.success ? parsed.data : takeHomeInputsSchema.parse({});
+}
+
+/** Merges a validated patch onto the saved assumptions. */
+export async function saveTakeHomeInputs(raw: unknown): Promise<TakeHomeInputs> {
+  const patch = takeHomePatchSchema.parse(raw);
+  if (!Object.keys(patch).length) throw new Error("send at least one field to save");
+  const next = takeHomeInputsSchema.parse({ ...(await getTakeHomeInputs()), ...patch });
+  if ((next.ytdGrossCents == null) !== (next.ytdAsOf == null)) throw new Error("a pay stub needs both the year-to-date gross and its date");
+  const { setConfig } = await import("./config");
+  await setConfig(TAKE_HOME_KEY, JSON.stringify(next));
+  return next;
+}
+
+const PAYROLL_401K = /\b401\s?\(?k\)?|\b403\s?\(?b\)?|\b457\b/i;
+const money$ = (c: number) => `$${(c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** The year's estimate from the ledger, the income log, business expenses, the tax profile and the saved assumptions. */
+export async function getTakeHome(year = 2026, opts: { w2GrossCents?: number | null; today?: string } = {}) {
+  if (year !== 2026) throw new Error(`take-home is only modelled for 2026 (the year whose federal and California figures are verified), not ${year}`);
+  const [{ getPlanningProfile }, { getIncomeDetails, depositsById }, { seIncome, listExpenses }, { getInvestmentHistory }] = await Promise.all([
+    import("./financial-planning"), import("./income"), import("./business"), import("./investment-history"),
+  ]);
+  const from = `${year}-01-01`, to = `${year}-12-31`;
+  const [profile, inputs, details, se, expenses, history] = await Promise.all([
+    getPlanningProfile(), getTakeHomeInputs(), getIncomeDetails(from, to), seIncome(year), listExpenses(year),
+    getInvestmentHistory({ from, to, kind: "contribution" }),
+  ]);
+  const tax = profile.tax;
+  const status = tax.filingStatus;
+
+  // Paycheck legs: W-2 bank deposits, plus Roth IRA and HSA contributions that no bank transfer paid for.
+  const w2 = details.filter((s) => s.source.taxTreatment === "w2");
+  const bank = [...(await depositsById(w2.flatMap((s) => s.depositMonths.flatMap((m) => m.txnIds)))).values()];
+  // A paycheck split across banks often has one leg still pending; leaving it out would halve that paycheck.
+  const { db } = await import("@/db");
+  const { transactions: tx, accounts: acc } = await import("@/db/schema");
+  const { and, eq, gt, gte } = await import("drizzle-orm");
+  const { isoDate } = await import("./format");
+  const pendingRows = await db.select({ id: tx.id, postedAt: tx.postedAt, amountCents: tx.amountCents, account: acc.name, accountId: tx.accountId, text: tx.merchantRaw })
+    .from(tx).innerJoin(acc, eq(acc.id, tx.accountId))
+    .where(and(eq(tx.isPending, true), gt(tx.amountCents, 0), eq(tx.isExcluded, false), gte(tx.postedAt, new Date(`${from}T00:00:00`))));
+  const pending = pendingRows.filter((p) => w2.some((s) => s.source.matchPattern && p.text.toLowerCase().includes(s.source.matchPattern.toLowerCase())));
+  for (const p of pending) bank.push({ id: p.id, date: isoDate(p.postedAt), amountCents: p.amountCents, account: `${p.account} (pending)`, accountId: p.accountId, description: p.text });
+  const firstDeposit = bank.map((d) => d.date).sort()[0] ?? null;
+  const typeOf = new Map(history.accounts.map((a) => [a.accountId, a.type]));
+  const contributions = history.events.filter((e) => e.kind === "contribution" && !e.internal);
+  const kindOf = (accountId: number, account: string): PayLeg["kind"] | null =>
+    typeOf.get(accountId) === "hsa" ? "hsa" : PAYROLL_401K.test(account) ? "401k" : typeOf.get(accountId) === "ira" ? "roth-ira" : null;
+  const legs: PayLeg[] = bank.map((d) => ({ txnId: d.id, date: d.date, account: d.account, accountId: d.accountId ?? 0, cents: d.amountCents, kind: "bank" as const }));
+  const notPaycheck: { txnId: number; date: string; account: string; cents: number; why: string }[] = [];
+  for (const e of contributions) {
+    const kind = kindOf(e.accountId, e.account);
+    if (!kind) continue;
+    const leg = { txnId: e.txnId, date: e.date, account: e.account, accountId: e.accountId, cents: e.amountCents, kind };
+    if (kind === "401k") { legs.push(leg); continue; }
+    if (e.fundedBy?.kind === "transfer") notPaycheck.push({ ...leg, why: `paid by ${e.fundedBy.label}` });
+    else if (/prior year/i.test(e.description)) notPaycheck.push({ ...leg, why: "prior-year contribution" });
+    else if (!firstDeposit || e.date < addDays(firstDeposit, -3)) notPaycheck.push({ ...leg, why: "before the first paycheck" });
+    else legs.push(leg);
+  }
+  const { paychecks, stray } = buildPaychecks(legs);
+  const { isoDate: iso } = await import("./format");
+  const payroll = reconstructPayroll(paychecks, inputs, status, year, opts.today ?? iso(new Date()));
+
+  // W-2 gross: override > tax-profile Box 1 > pay stub > ledger reconstruction.
+  const ledgerDeferrals = inputs.k401Type === "pretax" ? payroll.ytd.deferral401kCents + payroll.projected.deferral401kCents : 0;
+  const pretax = inputs.pretaxDeferralsCents ?? ledgerDeferrals;
+  const hsaPayrollCents = inputs.hsaPayroll ? payroll.ytd.hsaCents + payroll.projected.hsaCents : 0;
+  const box1 = tax.year === year && tax.wagesBox1 > 0 ? r(tax.wagesBox1 * 100) : null;
+  let w2Gross: number, how: string, basis: "override" | "tax-profile" | "pay-stub" | "ledger";
+  if (opts.w2GrossCents != null) { w2Gross = opts.w2GrossCents; basis = "override"; how = `${money$(w2Gross)} as given`; }
+  else if (box1) { w2Gross = box1 + pretax + hsaPayrollCents; basis = "tax-profile"; how = `W-2 Box 1 ${money$(box1)} from the tax profile, plus pre-tax deferrals`; }
+  else if (inputs.ytdGrossCents != null && inputs.ytdAsOf) {
+    const after = payroll.paychecks.filter((p) => p.date > inputs.ytdAsOf!).reduce((n, p) => n + p.grossCents, 0);
+    w2Gross = inputs.ytdGrossCents + after + payroll.projected.grossCents; basis = "pay-stub";
+    how = `pay stub ${money$(inputs.ytdGrossCents)} through ${inputs.ytdAsOf}${after ? `, ${money$(after)} rebuilt from later paychecks` : ""}${payroll.remainingPaydays.length ? `, ${payroll.remainingPaydays.length} more at ${money$(payroll.perCheckCents)}` : ""}`;
+  } else {
+    w2Gross = payroll.ytd.grossCents + payroll.projected.grossCents; basis = "ledger";
+    const posting = payroll.paychecks.filter((p) => p.counted.grossCents !== p.grossCents).length;
+    how = `${payroll.paychecks.length} paychecks rebuilt from the ledger (${money$(payroll.ytd.grossCents)} gross from ${money$(payroll.ytd.netCents)} net${posting ? `; ${posting} still posting, counted at ${money$(payroll.perCheckCents)}` : ""})${payroll.remainingPaydays.length ? ` + ${payroll.remainingPaydays.length} more at ${money$(payroll.perCheckCents)} through Dec 31` : ""}`;
+  }
+  const fedWithheld = inputs.federalWithheldCents ?? (tax.year === year && tax.withholdingBox2 > 0 ? r(tax.withholdingBox2 * 100) : basis === "override" ? null : payroll.ytd.federalCents + payroll.projected.federalCents);
+  const caWithheld = inputs.caWithheldCents ?? (basis === "override" ? null : payroll.ytd.caCents + payroll.projected.caCents);
+  const withheldIsEstimate = inputs.federalWithheldCents == null && !(tax.year === year && tax.withholdingBox2 > 0);
+
+  const seExpensesCents = expenses.reduce((n, e) => n + e.deductibleCents, 0);
+  const base: TakeHomeInput = {
+    filingStatus: status, w2GrossCents: w2Gross, pretaxDeferralsCents: pretax, hsaPayrollCents,
+    seGrossCents: se.grossCents + inputs.expectedSeCents, seExpensesCents, nontaxableCents: se.nontaxableCents,
+    federalWithheldCents: fedWithheld, caWithheldCents: caWithheld,
+  };
+  // Student loan interest entered on the goal of that name: an above-the-line deduction.
+  const { goals: goalRows } = await import("@/db/schema");
+  const sliGoal = (await db.select().from(goalRows).where(and(eq(goalRows.isActive, true), eq(goalRows.taxYear, year), eq(goalRows.progressKind, "manual")))).find(isStudentLoanInterestGoal);
+  base.studentLoanInterestCents = sliGoal?.manualProgressCents ?? 0;
+  base.year = year;
+  const result = computeTakeHome(base);
+  const totalWith = (interestCents: number) => computeTakeHome({ ...base, studentLoanInterestCents: interestCents }).totalTaxCents;
+  const noInterestTax = totalWith(0);
+  const studentLoan = {
+    goalId: sliGoal?.id ?? null, ...result.studentLoanInterest,
+    phaseOut: status === "separate" ? null : STUDENT_LOAN_PHASEOUT[year]?.[status === "joint" ? "joint" : "single"] ?? null,
+    taxSavedCents: noInterestTax - result.totalTaxCents,
+    fullCapSavesCents: noInterestTax - totalWith(result.studentLoanInterest.capCents),
+    marginalRate: result.federal.marginalRate + result.california.marginalRate,
+  };
+  const fullYearInput: TakeHomeInput = { ...base, w2GrossCents: inputs.annualSalaryCents, federalWithheldCents: null, caWithheldCents: null };
+  // 402(g) counts Roth and pre-tax deferrals alike; Social Security wages are gross less payroll HSA.
+  const ledger401k = { ytdCents: payroll.ytd.deferral401kCents, projectedCents: payroll.projected.deferral401kCents };
+  const sepW2 = {
+    ssWagesCents: Math.max(0, w2Gross - hsaPayrollCents),
+    deferralsCents: inputs.k401Type === "pretax" ? pretax : ledger401k.ytdCents + ledger401k.projectedCents,
+    deferralsEntered: inputs.k401Type === "pretax" && inputs.pretaxDeferralsCents != null,
+    ...ledger401k,
+  };
+  const sep = computeSep({ seGrossCents: base.seGrossCents, deductibleExpensesCents: seExpensesCents, w2SsWagesCents: sepW2.ssWagesCents, w2DeferralsCents: sepW2.deferralsCents });
+
+  // Where the 2026 money went.
+  const sumKind = (k: PayLeg["kind"], f: (e: (typeof contributions)[number]) => boolean = () => true) =>
+    contributions.filter((e) => kindOf(e.accountId, e.account) === k && f(e)).reduce((n, e) => n + e.amountCents, 0);
+  const rothCurrent = sumKind("roth-ira", (e) => !/prior year/i.test(e.description));
+  const rothPrior = sumKind("roth-ira", (e) => /prior year/i.test(e.description));
+  const k401 = sumKind("401k"), hsaTotal = sumKind("hsa");
+  const bankCash = payroll.paychecks.flatMap((p) => p.legs).filter((l) => l.kind === "bank").reduce((n, l) => n + l.cents, 0);
+  const moneyWent = {
+    rothIra: { cents: rothCurrent, priorYearCents: rothPrior, limitCents: LIMITS_2026.rothIraCents, roomCents: Math.max(0, LIMITS_2026.rothIraCents - rothCurrent) },
+    k401: { cents: k401, limitCents: LIMITS_2026.k402gCents, roomCents: Math.max(0, LIMITS_2026.k402gCents - k401), note: "Ledger deposits into the 401(k); any employer match here does not count toward the $24,500 employee limit." },
+    hsa: { cents: hsaTotal, limitCents: LIMITS_2026.hsaSelfCents, roomCents: Math.max(0, LIMITS_2026.hsaSelfCents - hsaTotal), note: "Self-only limit; employer HSA money counts toward it." },
+    sepRoomCents: sep.sep.maxCents,
+    taxCents: result.totalTaxCents,
+    cashToBanksCents: bankCash,
+    seCashCents: se.grossCents + se.nontaxableCents,
+  };
+
+  const notes = [
+    `W-2 gross: ${how}. Deposits are net pay, so each paycheck is grossed up through Pub 15-T and DE 44 withholding, FICA and SDI.`,
+    payroll.meanResidualCents == null ? "No complete full-time paychecks yet to check against salary (set when full-time began)." : `Calibration: complete full-time checks average ${money$(Math.abs(payroll.meanResidualCents))} ${payroll.meanResidualCents >= 0 ? "above" : "below"} ${money$(payroll.perCheckCents)} (salary ÷ ${inputs.periods}). A large gap means a deduction the model does not see (benefits, ESPP, a different W-4).`,
+    `401(k): a deposit covering several paydays is split across them; future paychecks defer ${(payroll.k401.rate * 100).toFixed(1)}% of pay (${payroll.k401.source}), ${money$(payroll.k401.perCheckCents)} a check.`,
+    `401(k) deposits are treated as ${inputs.k401Type === "pretax" ? "pre-tax" : "Roth (after-tax)"} employee deferrals; HSA deposits as ${inputs.hsaPayroll ? "pre-tax payroll (California still taxes them)" : "a split of net pay (after tax)"}.`,
+    ...(studentLoan.deductionCents ? [`Student loan interest: ${money$(studentLoan.paidCents)} paid (from the goal), ${money$(studentLoan.deductionCents)} deducted above the line, saving about ${money$(studentLoan.taxSavedCents)} federal and California tax.`] : []),
+    withheldIsEstimate ? "Withholding is the model's estimate, not read from a pay stub; enter Box 2 / Box 17 (or a stub's year-to-date) to replace it." : "Withholding is as entered.",
+    `1099 income: ${money$(se.grossCents)} logged and paid in ${year}${inputs.expectedSeCents ? `, plus ${money$(inputs.expectedSeCents)} expected` : ""}${se.nontaxableCents ? `; ${money$(se.nontaxableCents)} marked nontaxable is excluded from tax` : ""}.`,
+  ];
+  return {
+    year, inputs, filingStatus: status,
+    w2: { grossCents: w2Gross, basis, how, firstDeposit, withheldIsEstimate },
+    payroll, notPaycheck, strayLegs: stray, sepW2,
+    se: { loggedCents: se.grossCents, expectedCents: inputs.expectedSeCents, expensesCents: seExpensesCents, nontaxableCents: se.nontaxableCents, sources: se.sources },
+    result, setAside: seSetAside(base),
+    fullYear: { result: computeTakeHome(fullYearInput), setAside: seSetAside(fullYearInput) },
+    moneyWent, notes, studentLoan,
+    sources: [...TAKE_HOME_SOURCES, ...WITHHOLDING_SOURCES, ...LIMITS_2026.sources], verifiedAsOf: TAKE_HOME_VERIFIED_AS_OF, disclaimer: TAKE_HOME_DISCLAIMER,
+  };
+}
+export type TakeHomeReport = Awaited<ReturnType<typeof getTakeHome>>;
