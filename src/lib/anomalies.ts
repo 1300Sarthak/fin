@@ -25,6 +25,7 @@ import {
 } from "date-fns";
 import { formatUSD, formatDateShort, monthLabel } from "@/lib/format";
 import { statusOf, CADENCE_DAYS, type Cadence } from "@/lib/recurring";
+import { INVESTMENT_ACCOUNT_TYPES, cashSweepSql } from "@/lib/cashflow-scope";
 
 /**
  * Spending anomalies
@@ -48,8 +49,6 @@ import { statusOf, CADENCE_DAYS, type Cadence } from "@/lib/recurring";
  *   spending, let alone a spike.
  */
 
-// Money moving into these account types is investing, not spending.
-const INVESTMENT_ACCOUNT_TYPES = ["brokerage", "ira", "crypto"] as const;
 // These category kinds aren't discretionary spend, so they can't "spike".
 const NON_SPEND_KINDS = new Set(["income", "transfer", "investment"]);
 
@@ -182,6 +181,7 @@ export async function getSpendingAnomalies(
           eq(transactions.isExcluded, false),
           eq(transactions.isRefund, false),
           notInArray(transactions.accountId, investmentAccounts),
+          sql`NOT ${cashSweepSql()}`,
         ),
       ),
     db

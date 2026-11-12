@@ -4,7 +4,7 @@ import { and, asc, eq, gt, gte, inArray, isNull, like, lte, ne, or, sql } from "
 import { getHideZeroAccounts } from "@/lib/config";
 import { getCashAccount } from "@/lib/cash";
 
-const INVESTMENT_ACCOUNT_TYPES = new Set(["brokerage", "ira", "crypto"]);
+import { isInvestmentAccountType } from "@/lib/cashflow-scope";
 
 /**
  * Predicate for the "hide $0 accounts" setting.
@@ -71,7 +71,7 @@ export async function getSpendableAccounts(): Promise<{ id: number; name: string
     .where(eq(accounts.isActive, true))
     .orderBy(asc(accounts.name));
   return rows
-    .filter((r) => !INVESTMENT_ACCOUNT_TYPES.has(r.type) && keep(r))
+    .filter((r) => !isInvestmentAccountType(r.type) && keep(r))
     .map((r) => ({ id: r.id, name: r.name }));
 }
 

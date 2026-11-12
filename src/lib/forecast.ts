@@ -3,6 +3,7 @@ import { accounts, appConfig, recurringSeries } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { addDays, differenceInCalendarDays, startOfDay } from "date-fns";
 import { ACCOUNT_TYPE_META } from "@/lib/accounts";
+import { isInvestmentAccountType } from "@/lib/cashflow-scope";
 import {
   CADENCE_DAYS,
   statusOf,
@@ -17,7 +18,6 @@ import { isoDate } from "@/lib/format";
  */
 
 // Money parked in these isn't available to pay a bill next Tuesday.
-const INVESTMENT_ACCOUNT_TYPES = new Set(["brokerage", "ira", "crypto"]);
 
 /** Untyped `app_config` key — same direct-read pattern as lib/ingest/sync.ts. */
 export const LOW_BALANCE_KEY = "low_balance_threshold_cents";
@@ -134,7 +134,7 @@ export async function getSpendableBalanceCents(): Promise<number> {
   return rows
     .filter(
       (a) =>
-        ACCOUNT_TYPE_META[a.type].isAsset && !INVESTMENT_ACCOUNT_TYPES.has(a.type),
+        ACCOUNT_TYPE_META[a.type].isAsset && !isInvestmentAccountType(a.type),
     )
     .reduce((s, a) => s + a.bal, 0);
 }
