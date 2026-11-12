@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { accounts, categories, transactions, balanceSnapshots } from "@/db/schema";
-import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
-import { subDays, startOfDay, parseISO, differenceInCalendarDays } from "date-fns";
+import { and, asc, eq, gte, inArray, ne } from "drizzle-orm";
+import { subDays, startOfDay, endOfDay, parseISO, differenceInCalendarDays } from "date-fns";
 import { isoDate } from "@/lib/format";
 import {
   getAccountTotals,
@@ -10,10 +10,11 @@ import {
 } from "@/lib/queries";
 import { getHideCash } from "@/lib/config";
 import { captureSnapshotsForToday } from "@/lib/snapshots";
-import { classifyInvestmentActivity, contributionAmountCents } from "@/lib/investment-activity";
+import { contributionAmountCents, countedContributions } from "@/lib/investment-activity";
 import { calculateLiquidMoney, type LiquidMoneySummary } from "@/lib/liquid-money";
 
-const INVESTMENT_ACCOUNT_TYPES = ["brokerage", "ira", "crypto"] as const;
+import { INVESTMENT_ACCOUNT_TYPES } from "@/lib/cashflow-scope";
+import { getCashflow } from "@/lib/spending";
 export async function getLiquidMoneySummary(includeAccountIds?: number[]): Promise<LiquidMoneySummary> {
   if (includeAccountIds?.length === 0) return calculateLiquidMoney([]);
   const rows = await db
@@ -180,6 +181,8 @@ export async function getNetWorthSeries(opts: {
         gte(transactions.postedAt, startDateObj),
         inArray(transactions.accountId, ids),
         eq(transactions.isTransfer, false),
+        // A split row nets spending in the ledger but moves no cash.
+        ne(transactions.source, "split"),
       ),
     );
 
@@ -242,6 +245,54 @@ export type NetWorthSummary = AccountTotals & {
 };
 
 /**
+ * Contribution rows into an IRA or an employer plan, each deposit once: Fidelity
+ * books a single contribution as a negative and a positive row on the same day.
+ * Pass investment-account rows only. Shared by Overview and History.
+ */
+export function retirementContributions<T extends Parameters<typeof countedContributions>[0][number] & { accountType: string; accountName: string }>(rows: T[]): T[] {
+  return countedContributions(rows).filter((t) => t.accountType === "ira" || /\b401\s?\(?k\)?|403\s?\(?b\)?|retirement\b/i.test(t.accountName));
+}
+
+/**
+ * Retirement deposits from these accounts since `start`, each counted once.
+ * Overview and History both read this, so they cannot disagree. A deposit
+ * flagged as a transfer (funded from a tracked bank) is still a deposit, as on
+ * the Earnings page; only an excluded row is left out.
+ */
+export async function getRetirementContributions(ids: number[], start: Date) {
+  if (!ids.length) return [];
+  const rows = await db
+    .select({ id: transactions.id, accountId: transactions.accountId, postedAt: transactions.postedAt, amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, categoryName: categories.name, categoryKind: categories.kind, accountType: accounts.type, accountName: accounts.name })
+    .from(transactions)
+    .innerJoin(accounts, eq(transactions.accountId, accounts.id))
+    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .where(and(gte(transactions.postedAt, start), inArray(transactions.accountId, ids), inArray(accounts.type, [...INVESTMENT_ACCOUNT_TYPES]), eq(transactions.isExcluded, false)));
+  return retirementContributions(rows);
+}
+
+/**
+ * The account scope for cash-flow figures beside net worth. With nothing
+ * deselected it is every account, closed ones included, exactly as the
+ * Spending page counts: a closed card's purchases were still spending. Once
+ * the user narrows the selection, only the selected accounts count. An
+ * account hidden by a setting (`hiddenIds`, e.g. cash hidden from net worth)
+ * is not a selection: its spending still counts.
+ */
+export function cashflowAccountIds(includeIds: ReadonlySet<number>, allActiveIds: readonly number[], hiddenIds: ReadonlySet<number> = new Set()): number[] | undefined {
+  return allActiveIds.every((id) => includeIds.has(id) || hiddenIds.has(id)) ? undefined : [...includeIds];
+}
+
+/** `cashflowAccountIds` with the hide-cash-from-net-worth setting applied. */
+export async function cashflowScope(includeIds: ReadonlySet<number>, allActiveIds: readonly number[]): Promise<number[] | undefined> {
+  const hidden = new Set<number>();
+  if (await getHideCash()) {
+    const cash = await db.select({ id: accounts.id }).from(accounts).where(eq(accounts.type, "cash"));
+    for (const c of cash) hidden.add(c.id);
+  }
+  return cashflowAccountIds(includeIds, allActiveIds, hidden);
+}
+
+/**
  * Net-worth totals + a daily series for the selected range and inclusion set.
  * Callable with no args (defaults to 1M, baseline inclusion) for the chat tool.
  * Captures today's snapshots first so today is always authoritative.
@@ -272,36 +323,20 @@ export async function getNetWorthSummary(args: {
     return idx >= 0 ? points[idx].net : (points[0]?.net ?? totals.net);
   };
 
-  // Refunds reverse spending; they are never income in cash-flow history.
+  // Made and Spent are the Spending page's numbers for the same days, so the
+  // two pages cannot disagree; see `cashflowAccountIds` for the account scope.
   let rangeIncomeCents = 0;
   let rangeSpendingCents = 0;
   let rangeRetirementContributionCents = 0;
   if (ids.length) {
-    const [row, investmentRows] = await Promise.all([db
-      .select({
-        income: sql<number>`COALESCE(SUM(CASE WHEN ${transactions.amountCents} > 0 AND ${transactions.isRefund} = 0 THEN ${transactions.amountCents} ELSE 0 END), 0)`,
-        spending: sql<number>`COALESCE(SUM(CASE WHEN ${transactions.amountCents} < 0 THEN -${transactions.amountCents} WHEN ${transactions.isRefund} = 1 THEN -${transactions.amountCents} ELSE 0 END), 0)`,
-      })
-      .from(transactions)
-      .where(
-        and(
-          gte(transactions.postedAt, startOfDay(parseISO(series.startDate))),
-          inArray(transactions.accountId, ids),
-          eq(transactions.isTransfer, false),
-          eq(transactions.isExcluded, false),
-        ),
-      )
-      .get(),
-      db.select({ amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, categoryName: categories.name, categoryKind: categories.kind, accountType: accounts.type, accountName: accounts.name })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .leftJoin(categories, eq(transactions.categoryId, categories.id))
-        .where(and(gte(transactions.postedAt, startOfDay(parseISO(series.startDate))), inArray(transactions.accountId, ids), inArray(accounts.type, [...INVESTMENT_ACCOUNT_TYPES]), eq(transactions.isExcluded, false))),
+    const start = startOfDay(parseISO(series.startDate));
+    const [flow, retirement] = await Promise.all([
+      getCashflow({ start, end: endOfDay(new Date()), key: series.startDate.slice(0, 7), label: series.startDate }, await cashflowScope(includeIds, allActiveIds)),
+      getRetirementContributions(ids, start),
     ]);
-    rangeIncomeCents = row?.income ?? 0;
-    rangeSpendingCents = row?.spending ?? 0;
-    rangeRetirementContributionCents = investmentRows
-      .filter((transaction) => classifyInvestmentActivity(transaction).kind === "contribution" && (transaction.accountType === "ira" || /\b401\s?\(?k\)?|403\s?\(?b\)?|retirement\b/i.test(transaction.accountName)))
+    rangeIncomeCents = flow.incomeCents;
+    rangeSpendingCents = flow.spendingCents;
+    rangeRetirementContributionCents = retirement
       .reduce((sum, transaction) => sum + contributionAmountCents(transaction.amountCents), 0);
   }
 

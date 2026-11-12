@@ -56,3 +56,16 @@ export async function getBurnReport(from: string, to = from): Promise<BurnReport
   );
   return buildReport(raw, first.start, last.end, from);
 }
+
+/**
+ * Same report for an inclusive day range ("2026-11-01", "2026-11-11"), for the
+ * spending page's arbitrary periods. A whole-month range gives exactly the
+ * numbers `getBurnReport(month)` does.
+ */
+export async function getBurnReportForDays(from: string, to: string): Promise<BurnReport> {
+  const start = new Date(`${from}T00:00:00`);
+  const end = new Date(`${to}T23:59:59.999`);
+  const margin = PAIR_WINDOW_DAYS * 86_400_000;
+  const raw = await loadRows(new Date(start.getTime() - margin), new Date(end.getTime() + margin));
+  return buildReport(raw, start, end, from.slice(0, 7));
+}

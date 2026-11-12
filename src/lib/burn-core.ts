@@ -19,9 +19,8 @@
  *
  * Kept free of database imports so the rules can be tested on fixtures.
  */
-import { classifyInvestmentActivity } from "@/lib/investment-activity";
-
-const INVESTMENT_TYPES = new Set(["brokerage", "ira", "crypto", "retirement"]);
+import { classifyInvestmentActivity, duplicateContributionLegs } from "@/lib/investment-activity";
+import { isCashSweep, isInvestmentAccountType } from "@/lib/cashflow-scope";
 
 /** Days either side of a transaction to look for its internal counterpart. */
 export const PAIR_WINDOW_DAYS = 4;
@@ -95,7 +94,7 @@ const monthOf = (d: Date) => iso(d).slice(0, 7);
 const days = (a: Date, b: Date) =>
   Math.abs(a.getTime() - b.getTime()) / 86_400_000;
 
-const isInvestment = (r: Raw) => INVESTMENT_TYPES.has(r.accountType);
+const isInvestment = (r: Raw) => isInvestmentAccountType(r.accountType);
 
 const investmentKind = (r: Raw) =>
   classifyInvestmentActivity({
@@ -136,10 +135,11 @@ function pairable(r: Raw): boolean {
  * contribution as negative. Magnitude plus proximity plus a transfer-shaped
  * description is what identifies a pair, so both directions are tried.
  */
-function pairInternal(rows: Raw[]): Map<number, number> {
+function pairInternal(rows: Raw[], duplicates: Map<number, number>): Map<number, number> {
   const paired = new Map<number, number>();
   const taken = new Set<number>();
-  const candidates = rows.filter((r) => !r.isExcluded && pairable(r));
+  // A redundant contribution leg must not claim the funding leg its twin needs.
+  const candidates = rows.filter((r) => !r.isExcluded && !duplicates.has(r.id) && pairable(r));
 
   const byAmount = new Map<number, Raw[]>();
   for (const r of candidates) {
@@ -174,15 +174,29 @@ function pairInternal(rows: Raw[]): Map<number, number> {
 }
 
 /**
+ * Fidelity books one contribution as a negative and a positive row on the same
+ * day; map the redundant leg to the one kept so it is counted once.
+ */
+function duplicateContributions(rows: Raw[]): Map<number, number> {
+  return duplicateContributionLegs(
+    rows
+      .filter((r) => !r.isExcluded && isInvestment(r) && investmentKind(r) === "contribution")
+      .map((r) => ({ id: r.id, accountId: r.accountId, day: iso(r.postedAt), amountCents: r.amountCents })),
+  );
+}
+
+/**
  * Dividend reinvestment and cash sweeps post as two rows on the same day in
  * the same account: the credit, then the purchase that consumes it. They net
- * to nothing, so neither is income nor spending.
+ * to nothing, so neither is income nor spending. A contribution is never one
+ * of these legs: its same-day opposite is either its own duplicate (handled by
+ * `duplicateContributions`) or the sweep that parks it in the core position.
  */
 function selfNetted(rows: Raw[]): Set<number> {
   const out = new Set<number>();
   const seen = new Map<string, Raw>();
   for (const r of rows) {
-    if (!isInvestment(r)) continue;
+    if (!isInvestment(r) || r.isExcluded || investmentKind(r) === "contribution") continue;
     const key = `${r.accountId}|${iso(r.postedAt)}|${Math.abs(r.amountCents)}`;
     const prior = seen.get(key);
     if (prior && Math.sign(prior.amountCents) !== Math.sign(r.amountCents)) {
@@ -200,8 +214,13 @@ function classify(
   r: Raw,
   paired: Map<number, number>,
   netted: Set<number>,
+  duplicates: Map<number, number>,
 ): Pick<FlowRow, "kind" | "reason" | "pairedWith"> {
   if (r.isExcluded) return { kind: "excluded", reason: "marked excluded" };
+  const twin = duplicates.get(r.id);
+  if (twin !== undefined) {
+    return { kind: "market", reason: `second report of contribution #${twin}`, pairedWith: twin };
+  }
 
   const mate = paired.get(r.id);
   if (r.isTransfer) {
@@ -230,6 +249,10 @@ function classify(
     }
     // Fees, withdrawals and ordinary card activity on a brokerage still move
     // real money, so fall through to the sign-based rules below.
+  } else if (isCashSweep({ merchantRaw: r.merchantRaw, accountType: r.accountType, accountName: r.account })) {
+    // A cash-management account parks its balance in a money-market core under
+    // the bare institution name; the move in or out is neither earned nor spent.
+    return { kind: "internal", reason: "money-market sweep inside the account" };
   }
 
   if (r.isRefund) return { kind: "refund", reason: "flagged as a refund" };
@@ -331,7 +354,7 @@ export function allocate(report: BurnReport): Allocation[] {
   // Cash the user moved into a brokerage themselves is saving too, even though
   // it nets to zero across accounts.
   const fundedInvesting = report.rows
-    .filter((r) => r.kind === "internal" && INVESTMENT_TYPES.has(r.accountType))
+    .filter((r) => r.kind === "internal" && isInvestmentAccountType(r.accountType))
     .reduce((s, r) => s + r.econCents, 0);
 
   const t = report.total;
@@ -356,7 +379,8 @@ export function allocate(report: BurnReport): Allocation[] {
  * straddles the boundary can find its counterpart.
  */
 export function buildReport(raw: Raw[], start: Date, end: Date, label: string): BurnReport {
-  const paired = pairInternal(raw);
+  const duplicates = duplicateContributions(raw);
+  const paired = pairInternal(raw, duplicates);
   const netted = selfNetted(raw);
   const rows: FlowRow[] = raw
     .filter((r) => r.postedAt >= start && r.postedAt <= end)
@@ -373,7 +397,7 @@ export function buildReport(raw: Raw[], start: Date, end: Date, label: string): 
       merchant: r.merchantRaw,
       category: r.category,
       categoryKind: r.categoryKind,
-      ...classify(r, paired, netted),
+      ...classify(r, paired, netted, duplicates),
     }));
 
   const monthKeys = [...new Set(rows.map((r) => r.month))].sort();
