@@ -308,6 +308,13 @@ export const goals = sqliteTable("goals", {
   priority: integer().notNull().default(0), // lower = funded first (snowball order)
   monthlyContributionCents: integer(), // optional per-month cap
   targetDate: text(), // YYYY-MM-DD, optional
+  // How progress is measured. "balance" (default) = linked account balances.
+  // The rest count money put in during `taxYear`, from the ledger: roth_ira /
+  // hsa contributions, 401k employee deferrals (take-home reconstruction), or
+  // "manual" (`manualProgressCents`, e.g. student-loan interest from a 1098-E).
+  progressKind: text({ enum: ["balance", "roth_ira", "hsa", "k401", "manual"] }).notNull().default("balance"),
+  taxYear: integer(),
+  manualProgressCents: integer(),
   isActive: integer({ mode: "boolean" }).notNull().default(true),
   createdAt: integer({ mode: "timestamp" }).notNull().default(now),
 });
