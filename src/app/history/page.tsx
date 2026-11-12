@@ -1,15 +1,10 @@
 import Link from "next/link";
-import { PageHeader } from "@/components/page-header";
-import { EmptyState } from "@/components/empty-state";
-import { StatCard } from "@/components/stat-card";
-import { NetWorthChart } from "@/components/net-worth-chart";
-import { RangeSelector } from "@/components/range-selector";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { ChevronRight } from "lucide-react";
+import { dataTable, DeltaText, Disclosure, EmptyState, HelpTip, inRange, Money, PageHeader, RangePicker, resolveRange, Section, Stat, StatGroup } from "@/components/kit";
+import { TimeSeriesChart } from "@/components/kit/time-series-chart";
+import { getNetWorthTimeline } from "@/lib/net-worth-timeline";
+import { txnHref } from "@/lib/txn-filter-core";
+import { HistoryBy } from "./_components/history-by";
 import {
   Table,
   TableBody,
@@ -29,16 +24,11 @@ import { getMilestones, type MilestoneLine, type HistoryMilestone } from "@/lib/
 import { MilestoneDialog } from "@/components/milestone-dialog";
 import { formatUSD, formatPct, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { getLiquidMoneySummary } from "@/lib/networth";
+import { getLiquidMoneySummary, resolveInclusion } from "@/lib/networth";
 import { getAccountsList } from "@/lib/queries";
 import { ConnectDataActions, NO_DATA_DESCRIPTION } from "@/components/connect-data";
 
 export const dynamic = "force-dynamic";
-
-const PERIOD_OPTIONS = [
-  { value: "month", label: "Monthly" },
-  { value: "week", label: "Weekly" },
-];
 
 function ChangeCell({ cents, pct }: { cents: number; pct: number | null }) {
   if (cents === 0) return <span className="text-muted-foreground">—</span>;
@@ -54,12 +44,12 @@ function ChangeCell({ cents, pct }: { cents: number; pct: number | null }) {
   );
 }
 
-function FlowRow({ f, goodWhenUp }: { f: CatFlow; goodWhenUp: boolean }) {
+function FlowRow({ f, goodWhenUp, href }: { f: CatFlow; goodWhenUp: boolean; href: string }) {
   const up = f.deltaCents > 0;
   const positive = goodWhenUp ? up : !up;
   return (
-    <div className="flex items-center justify-between py-2 text-sm">
-      <span className="truncate">{f.name}</span>
+    <Link href={href} className="hoverable group flex items-center justify-between gap-3 px-4 py-2.5 text-sm md:px-5">
+      <span className="truncate group-hover:underline">{f.name}</span>
       <span className="flex items-center gap-2">
         {Math.abs(f.deltaCents) >= 100 && (
           <span
@@ -74,7 +64,7 @@ function FlowRow({ f, goodWhenUp }: { f: CatFlow; goodWhenUp: boolean }) {
         )}
         <span className="tabular-nums">{formatUSD(f.cents)}</span>
       </span>
-    </div>
+    </Link>
   );
 }
 
@@ -120,367 +110,216 @@ function getMilestoneRows(milestones: HistoryMilestone[]) {
     .reverse();
 }
 
-function ManualMilestonesCard({
-  milestoneRows,
-  latest,
-}: {
-  milestoneRows: ReturnType<typeof getMilestoneRows>;
-  latest?: HistoryMilestone;
-}) {
+function Milestones({ milestoneRows, latest }: { milestoneRows: ReturnType<typeof getMilestoneRows>; latest?: HistoryMilestone }) {
   return (
-    <Card className="mb-6 py-0">
-      <CardHeader className="flex flex-row items-center justify-between gap-2">
-        <CardTitle className="text-base">Manual net worth milestones</CardTitle>
-        <MilestoneDialog previous={latest} />
-      </CardHeader>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Date</TableHead>
-            <TableHead className="text-right">Net worth</TableHead>
-            <TableHead className="text-right">Change</TableHead>
-            <TableHead>Included accounts</TableHead>
-            <TableHead>Tracked separately</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
+    <Section title="Manual net worth milestones" description={milestoneRows.length ? `${milestoneRows.length} checkpoints recorded by hand` : "Checkpoints you record by hand"} actions={<MilestoneDialog previous={latest} />} surface>
+      {milestoneRows.length === 0 ? <p className="text-muted-foreground px-5 py-6 text-sm">No checkpoints yet.</p> : (
+        <ul className="divide-y">
           {milestoneRows.map((m) => (
-            <TableRow key={m.date}>
-              <TableCell className="align-top">
-                <div className="flex items-center gap-1">
-                  <span className="font-medium">{formatDate(m.date)}</span>
+            <li key={m.date} className="px-4 py-3 md:px-5">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="text-sm font-medium">{formatDate(m.date)}</span>
                   <MilestoneDialog milestone={m} previous={m.previous} />
+                  {m.goal && <span className="text-muted-foreground truncate text-xs">· Goal: {m.goal}</span>}
                 </div>
-                {m.goal && (
-                  <div className="text-muted-foreground mt-1 text-xs">
-                    Goal: {m.goal}
-                  </div>
-                )}
-              </TableCell>
-              <TableCell className="align-top text-right font-medium tabular-nums">
-                {formatUSD(m.totalCents)}
-                {m.totalCents !== m.computedCents && (
-                  <div
-                    className="text-muted-foreground text-xs font-normal"
-                    title="The total you recorded differs from the sum of the lines"
-                  >
-                    lines {formatUSD(m.computedCents)}
-                  </div>
-                )}
-              </TableCell>
-              <TableCell className="align-top text-right">
-                <ChangeCell cents={m.changeCents} pct={null} />
-              </TableCell>
-              <TableCell className="min-w-[18rem] align-top">
-                <MilestoneLines lines={m.included} />
-                {m.note && (
-                  <p className="text-muted-foreground mt-2 text-xs">{m.note}</p>
-                )}
-              </TableCell>
-              <TableCell className="min-w-[15rem] align-top">
-                {m.excluded && m.excluded.length > 0 ? (
-                  <MilestoneLines lines={m.excluded} />
-                ) : (
-                  <span className="text-muted-foreground">—</span>
-                )}
-              </TableCell>
-            </TableRow>
+                <div className="flex items-baseline gap-3">
+                  <ChangeCell cents={m.changeCents} pct={null} />
+                  <span className="num text-sm font-semibold">{formatUSD(m.totalCents)}</span>
+                </div>
+              </div>
+              {m.totalCents !== m.computedCents && <p className="text-muted-foreground mt-0.5 text-right text-xs" title="The total you recorded differs from the sum of the lines">lines {formatUSD(m.computedCents)}</p>}
+              <Disclosure summary={`${m.included.length} included${m.excluded?.length ? ` · ${m.excluded.length} tracked separately` : ""}`}>
+                <div className="grid gap-4 pb-1 sm:grid-cols-2">
+                  <div><p className="text-muted-foreground mb-1.5 text-xs">Included accounts</p><MilestoneLines lines={m.included} /></div>
+                  <div><p className="text-muted-foreground mb-1.5 text-xs">Tracked separately</p>{m.excluded && m.excluded.length > 0 ? <MilestoneLines lines={m.excluded} /> : <span className="text-muted-foreground text-sm">—</span>}</div>
+                </div>
+                {m.note && <p className="text-muted-foreground mt-2 text-xs">{m.note}</p>}
+              </Disclosure>
+            </li>
           ))}
-        </TableBody>
-      </Table>
-    </Card>
+        </ul>
+      )}
+    </Section>
   );
 }
 
-export default async function HistoryPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ period?: string; at?: string }>;
-}) {
-  const { period, at } = await searchParams;
-  const periodType: PeriodType = period === "week" ? "week" : "month";
+type Params = Record<string, string | string[] | undefined>;
 
-  const [rows, milestones, liquidMoney, accounts] = await Promise.all([
+export default async function HistoryPage({ searchParams }: { searchParams: Promise<Params> }) {
+  const sp = await searchParams;
+  const at = typeof sp.at === "string" ? sp.at : undefined;
+  // `?period=week` is the old spelling; `period` now belongs to the range picker.
+  const periodType: PeriodType = sp.by === "week" || sp.period === "week" ? "week" : "month";
+  const range = resolveRange(sp, { fallback: "all" });
+
+  const [allRows, milestones, liquidMoney, accounts, timeline] = await Promise.all([
     getPeriodHistory(periodType),
     getMilestones(),
     getLiquidMoneySummary(),
     getAccountsList(),
+    resolveInclusion(undefined).then(getNetWorthTimeline),
   ]);
+  const chartWindow = { from: range.from, to: range.to };
+  const rows = allRows.filter((r) => inRange(range, r.end) || inRange(range, r.start));
   const milestoneRows = getMilestoneRows(milestones);
   const latestMilestone = milestones[milestones.length - 1];
+  const header = (description: string) => (
+    <PageHeader title="History" description={description} actions={<><HistoryBy value={periodType} /><RangePicker value={range} fallback="all" /></>} />
+  );
 
   // A brand-new install still produces one all-zero period; that is not history.
   if (accounts.length === 0 && milestones.length === 0) {
     return (
       <>
         <PageHeader title="History" description="Look back at how your money grew over time." />
-        <EmptyState
-          icon={HistoryIcon}
-          title="No history yet"
-          description={NO_DATA_DESCRIPTION}
-          action={<ConnectDataActions />}
-        />
+        <EmptyState icon={HistoryIcon} title="No history yet" description={NO_DATA_DESCRIPTION} action={<ConnectDataActions />} />
       </>
     );
   }
 
-  if (rows.length === 0) {
+  if (allRows.length === 0) {
     // No synced history yet — the hand-recorded checkpoints carry the page.
     if (milestones.length === 0) {
       return (
         <>
-          <PageHeader
-            title="History"
-            description="Look back at how your money grew over time."
-          />
-          <EmptyState
-            icon={HistoryIcon}
-            title="No history yet"
-            description="Sync an account, or add a net worth checkpoint by hand to start the record."
-          />
+          <PageHeader title="History" description="Look back at how your money grew over time." />
+          <EmptyState icon={HistoryIcon} title="No history yet" description="Sync an account, or add a net worth checkpoint by hand to start the record." />
         </>
       );
     }
-
-    const manualChartData = milestones.map((m) => ({
-      date: m.date,
-      net: m.totalCents,
-    }));
     const latestManual = milestones[milestones.length - 1];
     const oldestManual = milestones[0];
     const manualChange = latestManual.totalCents - oldestManual.totalCents;
-
     return (
       <>
-        <PageHeader
-          title="History"
-          description="Look back at how your money grew over time."
-        >
-          <RangeSelector
-            options={PERIOD_OPTIONS}
-            value={periodType}
-            paramKey="period"
-            defaultValue="month"
-          />
-        </PageHeader>
-        <div className="mb-6 grid gap-4 sm:grid-cols-3">
-          <StatCard
-            label="Latest manual net worth"
-            value={formatUSD(latestManual.totalCents)}
-          />
-          <StatCard
-            label="Manual history change"
-            value={`${manualChange >= 0 ? "+" : "−"}${formatUSD(Math.abs(manualChange))}`}
-            accent={manualChange >= 0 ? "up" : "down"}
-          />
-          <StatCard
-            label="Manual entries"
-            value={String(milestones.length)}
-            sub={`${formatDate(oldestManual.date)} to ${formatDate(latestManual.date)}`}
-          />
-        </div>
-
-        <Card className="mb-6">
-          <CardHeader>
-            <CardTitle className="text-base">Manual net worth history</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <NetWorthChart data={manualChartData} />
-          </CardContent>
-        </Card>
-
-        <ManualMilestonesCard milestoneRows={milestoneRows} latest={latestMilestone} />
-
-        <EmptyState
-          icon={HistoryIcon}
-          title="No synced history yet"
-          description="Once you've synced some accounts, your net worth by week and month will build up here."
-        />
+        {header("Look back at how your money grew over time.")}
+        <StatGroup cols={3}>
+          <Stat label="Latest manual net worth" value={<Money cents={latestManual.totalCents} />} />
+          <Stat label="Manual history change" value={<Money cents={manualChange} signed />} tone={manualChange >= 0 ? "positive" : "negative"} />
+          <Stat label="Manual entries" value={milestones.length} sub={`${formatDate(oldestManual.date)} to ${formatDate(latestManual.date)}`} />
+        </StatGroup>
+        <Section className="mt-10" title="Manual net worth history" surface bodyClassName="px-2 pt-4 md:px-4">
+          <TimeSeriesChart points={milestones.map((m) => ({ date: m.date, cents: m.totalCents, kind: "manual" as const }))} window={chartWindow} />
+        </Section>
+        <div className="mt-10"><Milestones milestoneRows={milestoneRows} latest={latestMilestone} /></div>
+        <EmptyState className="mt-10" icon={HistoryIcon} title="No synced history yet" description="Once you've synced some accounts, your net worth by week and month will build up here." />
       </>
     );
   }
 
-  const selectedKey = at && rows.some((r) => r.key === at) ? at : rows[0].key;
-  const breakdown = await getPeriodBreakdown(periodType, selectedKey);
+  const shown = rows.length ? rows : allRows.slice(0, 1);
+  const selected = shown.find((r) => r.key === at) ?? allRows.find((r) => r.key === at) ?? shown[0];
+  const breakdown = await getPeriodBreakdown(periodType, selected.key);
 
-  // chart wants ascending end-of-period points
-  const chartPoints = new Map<string, number>();
-  for (const m of milestones) chartPoints.set(m.date, m.totalCents);
-  for (const r of [...rows].reverse()) chartPoints.set(r.end, r.netWorthCents);
-  const chartData = [...chartPoints.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, net]) => ({ date, net }));
-
-  const latest = rows[0];
-  const oldest = rows[rows.length - 1];
+  const latest = shown[0];
+  const oldest = shown[shown.length - 1];
   const spanChange = latest.netWorthCents - oldest.netWorthCents;
-  const totalSaved = rows.reduce((s, r) => s + r.savedCents, 0);
-
-  const pq = periodType === "week" ? "period=week&" : "";
+  const totalSaved = shown.reduce((s, r) => s + r.savedCents, 0);
   const unit = periodType === "week" ? "weeks" : "months";
+  const atHref = (key: string) => {
+    const q = new URLSearchParams(Object.entries(sp).flatMap(([k, v]) => (typeof v === "string" ? [[k, v]] : [])));
+    q.set("at", key);
+    return `/history?${q}`;
+  };
+  const span = { from: selected.start, to: selected.end };
 
   return (
     <>
-      <PageHeader
-        title="History"
-        description="Look back at how your money grew — and where it came from and went."
-      >
-        <RangeSelector
-          options={PERIOD_OPTIONS}
-          value={periodType}
-          paramKey="period"
-          defaultValue="month"
-        />
-      </PageHeader>
+      {header("Look back at how your money grew, and where it came from and went.")}
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-3">
-        <StatCard label="Net worth now" value={formatUSD(latest.netWorthCents)} />
-        <StatCard
-          label={`Change over ${rows.length} ${unit}`}
-          value={`${spanChange >= 0 ? "+" : "−"}${formatUSD(Math.abs(spanChange))}`}
-          accent={spanChange >= 0 ? "up" : "down"}
-        />
-        <StatCard
-          label={`Saved across ${rows.length} ${unit}`}
-          value={formatUSD(totalSaved)}
-          accent={totalSaved >= 0 ? "up" : "down"}
-          sub="income minus spending"
-        />
-      </div>
+      {/* The one loud thing: net worth now, its change over the range, and the line. */}
+      <section aria-labelledby="hist-nw" className="bg-card rounded-2xl border">
+        <div className="px-5 pt-5 md:px-6 md:pt-6">
+          <div id="hist-nw" className="text-muted-foreground text-[13px]">Net worth at the end of {latest.label}</div>
+          <div className="mt-1 text-[40px] leading-[1.1] font-semibold tracking-[-0.035em] md:text-[46px]"><Money cents={latest.netWorthCents} dimCents /></div>
+          <div className="mt-2"><DeltaText cents={spanChange} label={`over ${shown.length} ${unit}`} /></div>
+        </div>
+        <div className="px-2 pt-4 md:px-4"><TimeSeriesChart points={timeline.points} realFrom={timeline.realFrom} window={chartWindow} /></div>
+        <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 border-t px-5 py-4 md:px-6 lg:grid-cols-4">
+          {[
+            { label: `Saved across ${shown.length} ${unit}`, cents: totalSaved, tone: totalSaved >= 0 ? "text-positive" : "text-negative", help: "Income minus spending, summed over the periods shown." },
+            { label: "Liquid assets today", cents: liquidMoney.liquidAssetsCents, tone: "", help: "Spendable balances only, with investments kept separate." },
+            { label: "Liabilities today", cents: liquidMoney.liabilitiesCents, tone: "text-negative", help: undefined },
+            { label: "Liquid after liabilities", cents: liquidMoney.liquidAfterLiabilitiesCents, tone: liquidMoney.liquidAfterLiabilitiesCents < 0 ? "text-negative" : "text-positive", help: undefined },
+          ].map((f) => (
+            <div key={f.label} className="min-w-0">
+              <dt className="text-muted-foreground flex items-center gap-1 truncate text-xs">{f.label}{f.help && <HelpTip label={f.label}>{f.help}</HelpTip>}</dt>
+              <dd className={cn("num mt-0.5 text-[15px] font-semibold", f.tone)}>{formatUSD(f.cents)}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
 
-      <Card className="mb-6">
-        <CardHeader className="pb-3"><CardTitle className="text-base">Liquid money today</CardTitle><p className="text-muted-foreground text-sm">A current-day companion to your history: spendable balances only, with investments kept separate.</p></CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-3">
-          <div><div className="text-muted-foreground text-xs">Liquid assets</div><div className="mt-1 font-semibold tabular-nums">{formatUSD(liquidMoney.liquidAssetsCents)}</div></div>
-          <div><div className="text-muted-foreground text-xs">Liabilities</div><div className="mt-1 font-semibold text-negative tabular-nums">{formatUSD(liquidMoney.liabilitiesCents)}</div></div>
-          <div><div className="text-muted-foreground text-xs">Liquid after liabilities</div><div className={cn("mt-1 font-semibold tabular-nums", liquidMoney.liquidAfterLiabilitiesCents < 0 ? "text-negative" : "text-positive")}>{formatUSD(liquidMoney.liquidAfterLiabilitiesCents)}</div></div>
-        </CardContent>
-      </Card>
-
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-base">
-            Net worth by {periodType === "week" ? "week" : "month"}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <NetWorthChart data={chartData} />
-        </CardContent>
-      </Card>
-
-      <ManualMilestonesCard milestoneRows={milestoneRows} latest={latestMilestone} />
-
-      <Card className="mb-6 py-0">
-        <Table containerClassName="max-h-[70vh]">
-          <TableHeader className="bg-card sticky top-0 z-10">
-            <TableRow>
-              <TableHead>Period</TableHead>
-              <TableHead className="text-right">Net worth</TableHead>
-              <TableHead className="text-right">Change</TableHead>
-              <TableHead className="text-right">Income</TableHead>
-              <TableHead className="text-right">Retirement</TableHead>
-              <TableHead className="text-right">Earned / invested</TableHead>
-              <TableHead className="text-right">Spending</TableHead>
-              <TableHead className="text-right">Saved</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((r) => (
-              <TableRow
-                key={r.key}
-                className={cn(r.key === selectedKey && "bg-accent/40")}
-              >
-                <TableCell>
-                  <Link
-                    href={`/history?${pq}at=${r.key}`}
-                    className="font-medium hover:underline"
-                    scroll={false}
-                  >
-                    {r.label}
-                  </Link>
-                </TableCell>
-                <TableCell className="text-right font-medium tabular-nums">
-                  {formatUSD(r.netWorthCents)}
-                </TableCell>
-                <TableCell className="text-right">
-                  <ChangeCell cents={r.changeCents} pct={r.changePct} />
-                </TableCell>
-                <TableCell className="text-right tabular-nums text-positive">
-                  {r.incomeCents ? formatUSD(r.incomeCents) : "—"}
-                </TableCell>
-                <TableCell className="text-right tabular-nums text-info">
-                  {r.retirementContributionCents ? formatUSD(r.retirementContributionCents) : "—"}
-                </TableCell>
-                <TableCell className="text-right font-medium tabular-nums text-positive">
-                  {r.earnedAndInvestedCents ? formatUSD(r.earnedAndInvestedCents) : "—"}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {r.spendingCents ? formatUSD(r.spendingCents) : "—"}
-                </TableCell>
-                <TableCell
-                  className={cn(
-                    "text-right font-medium tabular-nums",
-                    r.savedCents < 0 && "text-negative",
-                  )}
-                >
-                  {formatUSD(r.savedCents)}
-                </TableCell>
+      <Section className="mt-10" title={`By ${periodType}`} description={`${shown.length} ${unit} · ${range.label}. Pick one to see where the money came from and went.`}>
+        <div className={dataTable.shell}>
+          <Table containerClassName="max-h-[70dvh]">
+            <TableHeader className={dataTable.stickyHead}>
+              <TableRow>
+                <TableHead className={dataTable.edge}>Period</TableHead>
+                <TableHead className={dataTable.num}>Net worth</TableHead>
+                <TableHead className={cn(dataTable.num, "hidden sm:table-cell")}>Change</TableHead>
+                <TableHead className={cn(dataTable.num, "hidden md:table-cell")}>Income</TableHead>
+                <TableHead className={cn(dataTable.num, "hidden lg:table-cell")}>Retirement</TableHead>
+                <TableHead className={cn(dataTable.num, "hidden lg:table-cell")}>Earned / invested</TableHead>
+                <TableHead className={cn(dataTable.num, "hidden md:table-cell")}>Spending</TableHead>
+                <TableHead className={cn(dataTable.num, dataTable.edge)}>Saved</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
+            </TableHeader>
+            <TableBody>
+              {shown.map((r) => (
+                <TableRow key={r.key} className={cn("hoverable", r.key === selected.key && "bg-brand/5")}>
+                  <TableCell className={dataTable.edge}>
+                    <Link href={atHref(r.key)} scroll={false} className="inline-flex items-center gap-1 font-medium hover:underline" aria-current={r.key === selected.key ? "true" : undefined}>
+                      {r.label}
+                      {r.key === selected.key && <ChevronRight className="text-brand size-3.5" aria-hidden="true" />}
+                    </Link>
+                  </TableCell>
+                  <TableCell className={cn(dataTable.num, "font-medium")}>{formatUSD(r.netWorthCents)}</TableCell>
+                  <TableCell className={cn(dataTable.num, "hidden sm:table-cell")}><ChangeCell cents={r.changeCents} pct={r.changePct} /></TableCell>
+                  <TableCell className={cn(dataTable.num, "text-positive hidden md:table-cell")}>
+                    {r.incomeCents ? <Link className="hover:underline" href={txnHref({ from: r.start, to: r.end, kind: "income" })}>{formatUSD(r.incomeCents)}</Link> : "—"}
+                  </TableCell>
+                  <TableCell className={cn(dataTable.num, "text-info hidden lg:table-cell")}>{r.retirementContributionCents ? formatUSD(r.retirementContributionCents) : "—"}</TableCell>
+                  <TableCell className={cn(dataTable.num, "text-positive hidden font-medium lg:table-cell")}>{r.earnedAndInvestedCents ? formatUSD(r.earnedAndInvestedCents) : "—"}</TableCell>
+                  <TableCell className={cn(dataTable.num, "hidden md:table-cell")}>
+                    {r.spendingCents ? <Link className="hover:underline" href={txnHref({ from: r.start, to: r.end, kind: "expense" })}>{formatUSD(r.spendingCents)}</Link> : "—"}
+                  </TableCell>
+                  <TableCell className={cn(dataTable.num, dataTable.edge, "font-medium", r.savedCents < 0 && "text-negative")}>{formatUSD(r.savedCents)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </Section>
 
       {breakdown && (
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">
-                Money in · {breakdown.label}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {breakdown.income.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  No income recorded this {periodType}.
-                </p>
+        <div className="mt-10 grid grid-cols-1 gap-10 lg:grid-cols-2 lg:gap-8">
+          {([
+            ["Money in", breakdown.income, true, "income", breakdown.incomeTotal],
+            ["Money out", breakdown.spending, false, "expense", breakdown.spendingTotal],
+          ] as const).map(([title, flows, good, kind, total]) => (
+            <Section
+              key={title}
+              title={`${title} · ${breakdown.label}`}
+              description={<>Total <Link className="text-foreground font-medium hover:underline" href={txnHref({ ...span, kind })}>{formatUSD(total)}</Link>; arrows compare to the previous {periodType}.</>}
+              surface
+            >
+              {flows.length === 0 ? (
+                <p className="text-muted-foreground px-5 py-6 text-sm">No {kind === "income" ? "income" : "spending"} recorded this {periodType}.</p>
               ) : (
                 <div className="divide-y">
-                  {breakdown.income.map((f) => (
-                    <FlowRow key={f.name} f={f} goodWhenUp />
-                  ))}
+                  {flows.map((f) => <FlowRow key={f.name} f={f} goodWhenUp={good} href={txnHref({ ...span, category: f.name, kind })} />)}
                 </div>
               )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">
-                Money out · {breakdown.label}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {breakdown.spending.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  No spending recorded this {periodType}.
-                </p>
-              ) : (
-                <div className="divide-y">
-                  {breakdown.spending.map((f) => (
-                    <FlowRow key={f.name} f={f} goodWhenUp={false} />
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+            </Section>
+          ))}
         </div>
       )}
 
-      <p className="text-muted-foreground mt-4 text-xs">
-        Arrows compare each category to the previous {periodType}. History grows
-        as you keep syncing — snapshots are saved daily.
-      </p>
+      <div className="mt-10"><Milestones milestoneRows={milestoneRows} latest={latestMilestone} /></div>
+
+      <p className="text-muted-foreground mt-6 text-xs">History grows as you keep syncing; snapshots are saved daily.</p>
     </>
   );
 }
