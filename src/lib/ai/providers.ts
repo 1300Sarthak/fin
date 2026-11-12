@@ -120,7 +120,7 @@ function classifyAnthropic(e: unknown): ProviderError {
 }
 
 async function anthropicAdapter(opts: CompleteOptions): Promise<CompleteResult> {
-  const model = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
+  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5";
   try {
     const client = new Anthropic({ maxRetries: opts.provider ? 0 : 2 });
     const body: Record<string, unknown> = {
@@ -292,7 +292,7 @@ const ADAPTERS: Record<Provider, (o: CompleteOptions) => Promise<CompleteResult>
         provider: "openai",
         baseURL: "https://api.openai.com/v1",
         apiKey: process.env.OPENAI_API_KEY ?? "",
-        model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+        model: o.model ?? process.env.OPENAI_MODEL ?? "gpt-4o-mini",
       },
       o,
     ),
@@ -302,7 +302,7 @@ const ADAPTERS: Record<Provider, (o: CompleteOptions) => Promise<CompleteResult>
         provider: "nim",
         baseURL: process.env.NIM_BASE_URL ?? "https://integrate.api.nvidia.com/v1",
         apiKey: nimKey() ?? "",
-        model: process.env.NIM_MODEL ?? "openai/gpt-oss-20b",
+        model: o.model ?? process.env.NIM_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b",
       },
       o,
     ),

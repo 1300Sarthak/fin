@@ -8,7 +8,11 @@ export const RESEARCH_LIMITS = {
   outputTokensPerStep: 1200,
   maxToolResultChars: 7000,
   maxContextChars: 42000,
-  timeoutMs: 90000,
+  /** Whole run, wall clock. Slow reasoning models (NIM) need a few minutes. */
+  timeoutMs: 240000,
+  /** Kept free at the end of the run for the no-tools summary call, so a slow
+   *  run ends with an answer from the evidence so far instead of a timeout. */
+  answerReserveMs: 60000,
 } as const;
 
 export const researchRequestSchema = z.object({

@@ -3,6 +3,8 @@ import { complete } from "./providers";
 import { ProviderError, type Provider } from "./types";
 import { researchLoop } from "./research-core";
 import { createResearchTools } from "./research-tools";
+import { loadPrivacy, privateComplete } from "@/lib/assistant/privacy";
+import { assistantStatus } from "@/lib/assistant/agent";
 import { RESEARCH_LIMITS, researchRequestSchema } from "./research-types";
 
 export function getResearchStatus() {
@@ -32,8 +34,13 @@ export function publicResearchError(error: unknown): string {
   if (error instanceof Error && error.name === "ZodError") return "Invalid research request. Use a 3–4,000 character prompt, a supported provider, 2–6 steps and explicit remote consent.";
   if (error instanceof Error && /No AI provider/.test(error.message)) return "No AI provider configured. Add ANTHROPIC_API_KEY, OPENAI_API_KEY or NVIDIA_API_KEY to .env.local and restart the server.";
   if (error instanceof Error && /not configured/.test(error.message)) return error.message;
-  if (error instanceof Error && /abort|timeout/i.test(error.name)) return "Research stopped or reached its 90-second time limit. A provider may still bill work already completed.";
+  if (error instanceof Error && /abort|timeout/i.test(error.name)) return `Research stopped or reached its ${RESEARCH_LIMITS.timeoutMs / 60000}-minute time limit. A provider may still bill work already completed.`;
   return "Research could not finish. Check provider configuration and try a smaller question.";
+}
+
+function transient(error: unknown): boolean {
+  const errors = error instanceof AggregateError ? error.errors : [error];
+  return errors.some((e) => e instanceof ProviderError && (e.kind === "server" || e.kind === "network"));
 }
 
 export async function runResearch(input: unknown, signal?: AbortSignal) {
@@ -43,9 +50,23 @@ export async function runResearch(input: unknown, signal?: AbortSignal) {
   if (!provider) throw new Error("No AI provider configured.");
   if (!status.providers.find((p) => p.id === provider)?.configured) throw new Error(`The selected ${provider} provider is not configured.`);
   const timeout = AbortSignal.timeout(RESEARCH_LIMITS.timeoutMs);
+  // On NIM, research runs on the assistant's model (ASSISTANT_MODEL, default Nemotron 3 Ultra) so both
+  // assistant modes use the model its header names; NIM_MODEL stays for categorising and the cash box.
+  const model = provider === "nim" ? assistantStatus().model : undefined;
+  const once: typeof complete = model ? (o) => complete({ ...o, model: o.model ?? model }) : complete;
+  // Hosted endpoints (NIM especially) shed load with a 5xx now and then: one retry after a short pause.
+  const send: typeof complete = async (o) => {
+    try { return await once(o); } catch (error) {
+      if (!transient(error) || o.signal?.aborted) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      o.signal?.throwIfAborted();
+      return once(o);
+    }
+  };
   return researchLoop(request, {
-    complete, tools: createResearchTools(request.includePrivateContext), provider,
+    complete: privateComplete(send, await loadPrivacy()), tools: createResearchTools(request.includePrivateContext), provider,
     signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
+    deadline: Date.now() + RESEARCH_LIMITS.timeoutMs,
     today: new Date().toISOString().slice(0, 10),
   });
 }

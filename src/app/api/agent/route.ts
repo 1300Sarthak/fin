@@ -2,7 +2,8 @@ import { getResearchStatus, publicResearchError, runResearch } from "@/lib/ai/re
 import { researchRequestSchema } from "@/lib/ai/research-types";
 
 export const runtime = "nodejs";
-export const maxDuration = 95;
+// Above RESEARCH_LIMITS.timeoutMs (240s), so the run's own limit answers first.
+export const maxDuration = 260;
 const headers = { "Cache-Control": "no-store" };
 let active = false;
 

@@ -31,6 +31,8 @@ export type ChatMessage = {
 export type CompleteOptions = {
   /** Pin a provider; explicit research consent never falls through to another vendor. */
   provider?: Provider;
+  /** Override the pinned provider's model (OpenAI-compatible providers only). */
+  model?: string;
   system?: string;
   messages: ChatMessage[];
   maxTokens?: number; // default 1024

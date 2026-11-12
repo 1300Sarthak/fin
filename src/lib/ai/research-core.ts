@@ -7,6 +7,10 @@ type Dependencies = {
   provider: Provider;
   signal: AbortSignal;
   today: string;
+  /** Epoch ms the answer is due. Tool steps stop `answerReserveMs` early so the
+   *  last call can summarize; omitted means no wall-clock budget. */
+  deadline?: number;
+  now?: () => number;
 };
 
 /** A bounded, read-only research loop shared by the terminal and web app. */
@@ -32,20 +36,37 @@ Dollar fields from the dashboard marked Cents must be divided by 100. Spendable 
 When data is missing or tools fail, explain the gap. If no evidence was retrieved, ask for the missing information instead of asserting financial conclusions.
 Keep the answer readable with a short conclusion, evidence, uncertainties, and concrete next steps. No markdown tables wider than four columns.`;
 
+  const now = deps.now ?? Date.now;
+  // Time left for gathering evidence before the summary call's reserve.
+  const gatherMs = () => (deps.deadline == null ? Infinity : deps.deadline - RESEARCH_LIMITS.answerReserveMs - now());
+  let outOfTime = false;
   for (let step = 0; step < request.maxSteps; step++) {
     deps.signal.throwIfAborted();
-    const finalStep = step === request.maxSteps - 1 || result.usage.toolCalls >= RESEARCH_LIMITS.maxToolCalls;
+    if (step > 0 && gatherMs() <= 0) outOfTime = true;
+    if (outOfTime) result.limited = true;
+    const finalStep = outOfTime || step === request.maxSteps - 1 || result.usage.toolCalls >= RESEARCH_LIMITS.maxToolCalls;
+    // A gathering step gets its own budget; running out of it moves on to the summary instead of failing the run.
+    const budget = gatherMs();
+    const stepSignal = finalStep || !Number.isFinite(budget) ? deps.signal : AbortSignal.any([deps.signal, AbortSignal.timeout(Math.max(1, budget))]);
     if (JSON.stringify(messages).length > RESEARCH_LIMITS.maxContextChars) {
       result.limited = true;
       result.answer = "The research context reached its size limit. Review the sources below and narrow the question before running again.";
       break;
     }
-    const response = await deps.complete({
-      system: finalStep ? `${system}\nThis is the final call. Summarize the evidence already available; no more tool calls.` : system,
-      messages, provider: deps.provider, tools: finalStep ? undefined : tools,
-      requireTools: step === 0 && tools.length > 0,
-      maxTokens: RESEARCH_LIMITS.outputTokensPerStep, signal: deps.signal,
-    });
+    let response: CompleteResult;
+    try {
+      response = await deps.complete({
+        system: finalStep ? `${system}\nThis is the final call. Summarize the evidence already available; no more tool calls.` : system,
+        messages, provider: deps.provider, tools: finalStep ? undefined : tools,
+        requireTools: step === 0 && tools.length > 0,
+        maxTokens: RESEARCH_LIMITS.outputTokensPerStep, signal: stepSignal,
+      });
+    } catch (error) {
+      if (stepSignal === deps.signal || deps.signal.aborted || !stepSignal.aborted) throw error;
+      outOfTime = true;
+      step--;
+      continue;
+    }
     result.usage.modelCalls++;
     result.usage.inputTokens += response.usage?.inputTokens ?? 0;
     result.usage.outputTokens += response.usage?.outputTokens ?? 0;
@@ -80,7 +101,7 @@ Keep the answer readable with a short conclusion, evidence, uncertainties, and c
         const tool = deps.tools[call.name];
         if (tool) {
           try {
-            const output = await tool.execute(call.input, deps.signal);
+            const output = await tool.execute(call.input, stepSignal);
             data = output.error ? { error: output.error, data: output.data } : output.data;
             ok = !output.error;
             error = output.error;
