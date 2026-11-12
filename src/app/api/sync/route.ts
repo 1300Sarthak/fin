@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
+import { autoCategorize } from "@/lib/categorize-auto";
 import { syncSimplefin, SyncError } from "@/lib/ingest/sync";
 import { detectTransfers } from "@/lib/transfers";
 
@@ -7,9 +8,11 @@ export const dynamic = "force-dynamic";
 
 export async function POST() {
   try {
-    const r = await syncSimplefin();
+    const r = await syncSimplefin(undefined, { deferCategorize: true });
     // Flag internal money movement (card payments, transfers) so spending stays clean.
     await detectTransfers();
+    // New rows get filed after the response is sent; autoCategorize never throws.
+    after(() => autoCategorize());
     const parts = [`${r.accounts} account${r.accounts === 1 ? "" : "s"}`];
     parts.push(`${r.newTransactions} new txn${r.newTransactions === 1 ? "" : "s"}`);
     if (r.updatedTransactions) parts.push(`${r.updatedTransactions} updated`);

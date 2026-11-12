@@ -8,6 +8,7 @@ import {
   isAccessUrl,
 } from "./simplefin";
 import { ingestAccounts, type IngestSummary } from "./adapter";
+import { autoCategorize, type AutoResult } from "@/lib/categorize-auto";
 
 /** Thrown for expected, user-actionable problems (e.g. missing/used token). */
 export class SyncError extends Error {}
@@ -99,7 +100,8 @@ const SYNC_WINDOW_DAYS = 89;
 
 export async function syncSimplefin(
   accessUrl?: string,
-): Promise<IngestSummary & { errors: string[] }> {
+  opts: { deferCategorize?: boolean } = {},
+): Promise<IngestSummary & { errors: string[]; autoCategorize: AutoResult | "deferred" }> {
   const url = accessUrl ?? (await resolveAccessUrl());
 
   const startOfToday = new Date();
@@ -110,5 +112,7 @@ export async function syncSimplefin(
   const resp = await fetchSimplefin(url, { startDate, pending: true });
   const { accounts, errors } = simplefinToNormalized(resp);
   const summary = await ingestAccounts(accounts, "simplefin");
-  return { ...summary, errors };
+  // New rows land filed. Never throws: a categorisation failure is one log line, not a failed sync.
+  // The web route defers it (after the response) so the Sync button never waits on a provider.
+  return { ...summary, errors, autoCategorize: opts.deferCategorize ? "deferred" : await autoCategorize() };
 }

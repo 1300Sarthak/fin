@@ -20,7 +20,7 @@
  */
 import { db } from "../src/db";
 import { accounts, transactions } from "../src/db/schema";
-import { and, eq, gte } from "drizzle-orm";
+import { and, eq, gte, ne } from "drizzle-orm";
 import { resolveAccessUrl } from "../src/lib/ingest/sync";
 import { fetchSimplefin } from "../src/lib/ingest/simplefin";
 
@@ -65,6 +65,8 @@ for (const acct of locals) {
       and(
         eq(transactions.accountId, acct.id),
         gte(transactions.postedAt, windowStart),
+        // Assistant split rows carry no provider id and are not leftovers.
+        ne(transactions.source, "split"),
       ),
     );
 
