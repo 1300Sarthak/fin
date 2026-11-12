@@ -2,6 +2,7 @@ import { getCashflow, monthRange, type MonthRange } from "@/lib/spending";
 import { getUpcomingBills } from "@/lib/forecast";
 import { getConfigCents } from "@/lib/config";
 import { pacificCalendarDate } from "@/lib/calendar";
+import { getBudgetGroupsReport, projectMonthEnd } from "@/lib/budget-groups";
 
 /**
  * "What can I spend today?" — the number the phone app opens on.
@@ -18,6 +19,14 @@ import { pacificCalendarDate } from "@/lib/calendar";
 export type Allowance = {
   monthKey: string;
   budgetCents: number | null;
+  /**
+   * Where the budget came from. With budget groups set, the monthly budget is
+   * their sum (a catch-all keeps it covering everything); otherwise the single
+   * `monthly_budget_cents` config value, as before. With groups, `spentCents`
+   * is what the groups count: everything when a catch-all exists, otherwise
+   * only the budgeted categories, so the two sides measure the same thing.
+   */
+  budgetSource: "groups" | "config" | null;
   spentCents: number;
   committedCents: number;
   /** budget − spent. Includes money already promised to bills. */
@@ -58,17 +67,25 @@ export async function getAllowance(month?: string): Promise<Allowance> {
   const daysElapsed = Math.min(Math.max(elapsed, 0), total);
   const daysRemaining = total - daysElapsed;
 
-  const [flow, budgetCents] = await Promise.all([
+  const [flow, configCents, report] = await Promise.all([
     getCashflow(r),
     getConfigCents("monthly_budget_cents"),
+    getBudgetGroupsReport(r.key),
   ]);
-  const spentCents = flow.spendingCents;
+  const hasGroups = report.groups.length > 0;
+  const budgetCents = hasGroups ? report.total.limitCents : configCents;
+  const budgetSource = hasGroups ? "groups" : configCents == null ? null : "config";
+  const spentCents = hasGroups ? report.total.spentCents : flow.spendingCents;
 
   // Only bills landing before month end are committed against this budget.
   const bills = daysRemaining > 0 ? await getUpcomingBills(daysRemaining) : [];
-  const committedCents = bills
-    .filter((b) => b.dueAt <= r.end)
-    .reduce((sum, b) => sum + b.amountCents, 0);
+  // Bills carry no category, so with groups they only count against a budget
+  // that covers everything (a catch-all). Otherwise a rent bill would eat a
+  // Food-only budget it has nothing to do with.
+  const billsCount = !hasGroups || report.groups.some((g) => g.catchAll);
+  const committedCents = billsCount
+    ? bills.filter((b) => b.dueAt <= r.end).reduce((sum, b) => sum + b.amountCents, 0)
+    : 0;
 
   const remainingCents = budgetCents == null ? 0 : budgetCents - spentCents;
   const freeCents = Math.max(remainingCents - committedCents, 0);
@@ -77,6 +94,7 @@ export async function getAllowance(month?: string): Promise<Allowance> {
   return {
     monthKey: r.key,
     budgetCents,
+    budgetSource,
     spentCents,
     committedCents,
     remainingCents,
@@ -89,7 +107,7 @@ export async function getAllowance(month?: string): Promise<Allowance> {
         ? null
         : Math.floor(freeCents / daysRemaining),
     paceCents,
-    projectedCents: paceCents * total,
+    projectedCents: projectMonthEnd(spentCents, daysElapsed, total),
     isOver: budgetCents != null && spentCents > budgetCents,
   };
 }
