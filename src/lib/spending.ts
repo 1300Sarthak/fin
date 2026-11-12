@@ -1,10 +1,8 @@
 import { db } from "@/db";
 import { transactions, categories, budgets, accounts } from "@/db/schema";
-import { and, eq, gte, lte, sql, isNotNull, isNull, inArray, notInArray, lt, or } from "drizzle-orm";
+import { and, eq, gt, gte, lte, sql, isNotNull, isNull, inArray, notInArray, lt, or } from "drizzle-orm";
 import type { getTransactions } from "@/lib/queries";
-
-// Money moving into these account types is investing, not spending.
-const INVESTMENT_ACCOUNT_TYPES = ["brokerage", "ira", "crypto"] as const;
+import { INVESTMENT_ACCOUNT_TYPES, cashSweepSql } from "@/lib/cashflow-scope";
 import {
   startOfMonth,
   endOfMonth,
@@ -34,18 +32,18 @@ export function monthRange(month?: string): MonthRange {
 
 /**
  * The shared "what counts as spending this month" filter. Always excludes
- * transfers and investment-type accounts (brokerage/IRA/crypto) — buying assets
+ * transfers, money-market sweeps and investment-type accounts (brokerage/IRA/crypto/HSA) — buying assets
  * isn't spending. `accountIds`: undefined = all (non-investment) accounts, a
  * list = only those, an empty list = none.
  */
 /** Activity that can affect cash flow. Category treatment is deliberately
  * separate: an Income category must still be eligible for the Made headline. */
-const cashflowActivityInMonth = (r: MonthRange, accountIds?: number[]) =>
+const cashflowActivity = () =>
   and(
-    gte(transactions.postedAt, r.start),
-    lte(transactions.postedAt, r.end),
     eq(transactions.isTransfer, false),
     eq(transactions.isExcluded, false),
+    // A money-market sweep is neither made nor spent.
+    sql`NOT ${cashSweepSql()}`,
     notInArray(
       transactions.accountId,
       db
@@ -53,6 +51,13 @@ const cashflowActivityInMonth = (r: MonthRange, accountIds?: number[]) =>
         .from(accounts)
         .where(inArray(accounts.type, [...INVESTMENT_ACCOUNT_TYPES])),
     ),
+  );
+
+const cashflowActivityInMonth = (r: MonthRange, accountIds?: number[]) =>
+  and(
+    gte(transactions.postedAt, r.start),
+    lte(transactions.postedAt, r.end),
+    cashflowActivity(),
     ...(accountIds === undefined
       ? []
       : accountIds.length
@@ -93,6 +98,20 @@ const spendingActivityInMonth = (r: MonthRange, accountIds?: number[]) =>
     or(isExpenseCategory(), and(eq(transactions.isRefund, true), isNull(transactions.refundsTxnId))),
   );
 
+const unlinkedRefund = () => and(eq(transactions.isRefund, true), isNull(transactions.refundsTxnId));
+
+/**
+ * The rows behind Spent, any date: purchases plus unlinked refunds. The
+ * /transactions `kind=expense` filter uses this too, so a drill-down lists
+ * exactly what `getCashflow` summed.
+ */
+export const spendingRowSql = () =>
+  and(cashflowActivity(), or(and(lt(transactions.amountCents, 0), isExpenseCategory()), unlinkedRefund()));
+
+/** The rows behind Made, any date; `kind=income` on /transactions uses it too. */
+export const incomeRowSql = () =>
+  and(cashflowActivity(), gt(transactions.amountCents, 0), eq(transactions.isRefund, false), isIncomeCategory());
+
 const inMonth = (r: MonthRange, accountIds?: number[]) =>
   and(cashflowActivityInMonth(r, accountIds), isExpenseCategory());
 
@@ -118,7 +137,7 @@ const linkedRefundsSql = () => sql`(
  * already been subtracted from its purchase, and counting it twice would push
  * spending negative.
  */
-const netSpentSql = () => sql<number>`COALESCE(SUM(CASE
+export const netSpentSql = () => sql<number>`COALESCE(SUM(CASE
     WHEN ${transactions.amountCents} < 0 AND ${isExpenseCategory()}
       THEN MAX(-${transactions.amountCents} - ${linkedRefundsSql()}, 0)
     WHEN ${transactions.isRefund} = 1 AND ${transactions.refundsTxnId} IS NULL
@@ -150,7 +169,7 @@ export async function getCashflow(
   const row = await db
     .select({
       // Refunds are excluded from income — they're netted out of spending instead.
-      income: sql<number>`COALESCE(SUM(CASE WHEN ${transactions.amountCents} > 0 AND ${transactions.isRefund} = 0 AND ${isIncomeCategory()} THEN ${transactions.amountCents} ELSE 0 END), 0)`,
+      income: sql<number>`COALESCE(SUM(CASE WHEN ${incomeRowSql()} THEN ${transactions.amountCents} ELSE 0 END), 0)`,
       spending: netSpentSql(),
       refunded: refundedSql(),
     })
@@ -242,16 +261,7 @@ export async function getSpendingTransactions(
   accountIds?: number[],
 ): Promise<SpendingTransaction[]> {
   const rows = await db.query.transactions.findMany({
-    where: and(
-      spendingActivityInMonth(r, accountIds),
-      or(
-        lt(transactions.amountCents, 0),
-        and(
-          eq(transactions.isRefund, true),
-          isNull(transactions.refundsTxnId),
-        ),
-      ),
-    ),
+    where: and(cashflowActivityInMonth(r, accountIds), spendingRowSql()),
     with: {
       account: true,
       category: true,

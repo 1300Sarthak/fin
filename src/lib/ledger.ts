@@ -16,7 +16,16 @@ import { and, eq, gte, sql } from "drizzle-orm";
  * A transfer is already outside cash flow, so excluding one would double up on
  * a decision the ledger has recorded elsewhere — restore it first instead.
  */
+export const SPLIT_ROW_ERROR = "This row was created by a split; undo the split instead";
+
+/** Rows the assistant's split created exist only to net a purchase; editing one in place breaks its undo. */
+export async function refuseSplitRow(id: number): Promise<void> {
+  const row = await db.select({ source: transactions.source }).from(transactions).where(eq(transactions.id, id)).get();
+  if (row?.source === "split") throw new Error(SPLIT_ROW_ERROR);
+}
+
 export async function setExcluded(id: number, isExcluded: boolean): Promise<void> {
+  await refuseSplitRow(id);
   const existing = await db
     .select({ id: transactions.id, isTransfer: transactions.isTransfer })
     .from(transactions)

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { transactions } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { refuseSplitRow } from "@/lib/ledger";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,7 @@ export async function POST(req: Request) {
         { status: 409 },
       );
     }
+    await refuseSplitRow(id);
     await db
       .update(transactions)
       .set({ isExcluded })

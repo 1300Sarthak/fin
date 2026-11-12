@@ -1,6 +1,8 @@
 import { db } from "@/db";
 import { transactions, categories, accounts } from "@/db/schema";
 import { and, desc, eq, sql, inArray, notInArray, ne } from "drizzle-orm";
+import { refuseSplitRow } from "@/lib/ledger";
+import { INVESTMENT_ACCOUNT_TYPES, cashSweepSql } from "@/lib/cashflow-scope";
 
 /**
  * Refunds
@@ -32,8 +34,8 @@ import { and, desc, eq, sql, inArray, notInArray, ne } from "drizzle-orm";
  * context in the UI, but it is not safe enough to change cash-flow history.
  */
 
-// Money into these account types is investing, not spending — and never a refund.
-const INVESTMENT_ACCOUNT_TYPES = ["brokerage", "ira", "crypto"] as const;
+// Money into investment-type accounts is investing, not spending — and never a
+// refund. A money-market sweep is internal movement, so never a refund either.
 
 /** How far back to look for the charge a refund is giving back. */
 export const REFUND_MATCH_WINDOW_DAYS = 120;
@@ -134,6 +136,7 @@ export async function findRefundCandidates(): Promise<RefundCandidate[]> {
         eq(transactions.isExcluded, false),
         eq(transactions.isRefund, false),
         notInArray(transactions.accountId, investmentAccounts),
+        sql`NOT ${cashSweepSql()}`,
       ),
     );
 
@@ -177,6 +180,7 @@ export async function setRefund(
   isRefund: boolean,
   refundsTxnId?: number | null,
 ): Promise<void> {
+  await refuseSplitRow(id);
   const refund = await db.select({
     id: transactions.id,
     accountId: transactions.accountId,
