@@ -14,7 +14,7 @@ import { monthRange, getSpendingByCategory } from "@/lib/spending";
 import { addNote, briefNotes, completeNotes, deleteNotes, isNoteKind, listNotes, setPinned, NOTE_KINDS, type NoteKind } from "@/lib/notes";
 import { getAllConfig, setConfig } from "@/lib/config";
 import { syncSimplefin } from "@/lib/ingest/sync";
-import { categorizeUncategorized } from "@/lib/categorize";
+import { categorizeUncategorized, readRunLog, recheckTransfers } from "@/lib/categorize";
 import { autoDetectRefunds } from "@/lib/refunds";
 import { detectTransfers } from "@/lib/transfers";
 import { detectRecurring } from "@/lib/recurring";
@@ -180,31 +180,41 @@ export async function sync(a: Args, json: boolean) {
 }
 
 /**
- * `categorizeUncategorized` swallows a failed provider batch and returns
- * `{usedAI:true, byAI:0}`, which reads exactly like a successful run that had
- * nothing to do. Distinguish the three outcomes here instead.
+ * Rules, the user's own history and built-in patterns first, then the AI for
+ * the rest. `--dry-run` decides everything and writes nothing; `--no-ai` stays
+ * local. `--log` shows what recent runs (including each sync's auto pass)
+ * filed; `--recheck-transfers` re-files Robinhood rows a merchant-only rule
+ * mislabelled. A provider that was called and filed nothing is a failure.
  */
 export async function categorize(a: Args, json: boolean) {
-  const r = await categorizeUncategorized({ limit: num(a, "limit", RANGE.limit) });
-  const categorized = r.byRule + r.byCache + r.byAI;
-  // The provider was called and assigned nothing: either it failed (the
-  // library retains no error) or it declined every row. Both need saying.
-  const aiFailed = r.usedAI && r.byAI === 0 && r.uncategorized > 0;
-  const detail = aiFailed
-    ? "the AI provider was called and returned nothing — check connectivity and `fin doctor`, then retry"
-    : r.note;
-
-  if (r.total === 0) {
-    return emit(json, { ...r, categorized, aiFailed: false }, () => "  nothing to do — no uncategorised transactions");
+  const dryRun = bool(a, "dry-run");
+  if (bool(a, "log")) {
+    const log = await readRunLog();
+    return emit(json, log, () => log.length
+      ? log.map((e) => `  ${e.at.slice(0, 16).replace("T", " ")}  ${e.trigger.padEnd(7)} ${e.skipped ? `skipped: ${e.skipped}` : `${e.total - e.left}/${e.total} filed — ${e.byRule} rule, ${e.byHistory} history, ${e.byBuiltin} built-in, ${e.byCache} cache, ${e.byAI} AI${e.aiError ? ` (AI: ${e.aiError})` : ""}`}`).join("\n")
+      : "  no categorise runs logged yet");
   }
-  if (categorized === 0) {
-    throw new Error(`categorised none of ${r.total} transactions; ${r.uncategorized} still uncategorised.${detail ? ` ${detail[0].toUpperCase()}${detail.slice(1)}` : ""}`);
+  if (bool(a, "recheck-transfers")) {
+    const r = await recheckTransfers({ dryRun });
+    return emit(json, { ...r, dryRun }, () => [
+      `  ${dryRun ? "would relabel" : "relabelled"} ${r.changes.length} of ${r.checked} Robinhood rows`,
+      ...r.changes.map((c) => `  #${c.id}  ${c.accountType.padEnd(9)} ${money(c.amountCents).padStart(11)}  ${c.from} → ${c.to}`),
+      r.skippedManual.length ? `  ${r.skippedManual.length} manual row(s) left alone: ${r.skippedManual.map((c) => `#${c.id} (${c.from}; rule says ${c.to})`).join(", ")}` : "",
+    ].filter(Boolean).join("\n"));
   }
-  emit(json, { ...r, categorized, aiFailed, ...(detail ? { note: detail } : {}) }, () =>
+  const r = await categorizeUncategorized({ limit: num(a, "limit", RANGE.limit), dryRun, noAI: bool(a, "no-ai"), trigger: "cli" });
+  if (r.total === 0) return emit(json, r, () => "  nothing to do — no uncategorised transactions");
+  if (r.categorized === 0) {
+    throw new Error(`categorised none of ${r.total} transactions.${r.aiError ? ` AI provider error: ${r.aiError}.` : ""}${r.note ? ` ${r.note}` : ""}`);
+  }
+  emit(json, r, () =>
     [
-      `  categorised ${categorized} of ${r.total} — ${r.byRule} by rule, ${r.byCache} by cache, ${r.byAI} by AI`,
-      r.uncategorized ? `  ${r.uncategorized} still uncategorised` : "",
-      detail ? `  ${detail}` : "",
+      `  ${dryRun ? "would categorise" : "categorised"} ${r.categorized} of ${r.total} — ${r.byRule} by rule, ${r.byHistory} from your history, ${r.byBuiltin} built-in, ${r.byCache} cached, ${r.byAI} by AI`,
+      r.lowConfidence ? `  ${r.lowConfidence} AI pick(s) under 60% confidence — applied; the confidence is stored on each row` : "",
+      r.left ? `  ${r.left} still uncategorised` : "",
+      r.aiError ? `  AI provider error: ${r.aiError}` : "",
+      r.note ? `  ${r.note}` : "",
+      ...(r.assignments ?? []).map((x) => `  #${x.id}  ${x.merchant.slice(0, 36).padEnd(36)} → ${x.category} (${x.source}, ${Math.round(x.confidence * 100)}%)`),
     ].filter(Boolean).join("\n"),
   );
 }
@@ -276,36 +286,4 @@ export async function query(a: Args, json: boolean) {
       rows.map((r) => cols.map((c) => (r[c] === null ? "—" : clip(String(r[c]), 40)))),
     ),
   );
-}
-
-/**
- * `fin allowance` — the daily-spend figure the phone app opens on, in the
- * terminal. Set the budget with `fin config monthly_budget_cents 65000`.
- */
-export async function allowance(a: Args, json: boolean) {
-  const { getAllowance } = await import("@/lib/allowance");
-  const r = await getAllowance(month(str(a, "month")));
-  emit(json, r, () => {
-    if (r.budgetCents == null) {
-      return "No monthly budget set.\nSet one with: fin config monthly_budget_cents 65000";
-    }
-    const lines = [
-      heading(`Allowance — ${r.monthKey}`),
-      kv([
-        ["Budget", money(r.budgetCents)],
-        ["Spent", `${money(r.spentCents)}  (day ${r.daysElapsed} of ${r.daysInMonth})`],
-        ["Committed bills", money(r.committedCents)],
-        ["Free to spend", money(r.freeCents)],
-        [
-          "Per day",
-          r.perDayCents == null
-            ? "—"
-            : `${money(r.perDayCents)}  over ${r.daysRemaining} days`,
-        ],
-        ["Current pace", `${money(r.paceCents)}/day → ${money(r.projectedCents)}`],
-      ]),
-    ];
-    if (r.isOver) lines.push(`\nOver budget by ${money(r.spentCents - r.budgetCents)}.`);
-    return lines.join("\n");
-  });
 }
