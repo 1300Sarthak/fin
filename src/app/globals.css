@@ -18,6 +18,8 @@
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
+  --color-brand: var(--brand);
+  --color-surface: var(--surface);
   --color-positive: var(--positive);
   --color-negative: var(--negative);
   --color-info: var(--info);
@@ -73,8 +75,8 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  --border: oklch(0.928 0 0);
+  --input: oklch(0.9 0 0);
   --ring: oklch(0.556 0 0);
   /* Money semantics. Both themes are checked against their own background at
      AA for normal text; the Tailwind -500 shades are not readable on white. */
@@ -93,7 +95,11 @@
   --chart-9: oklch(0.62 0.15 140);
   --chart-10: oklch(0.6 0.14 285);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
+  /* Brand is the chart-1 blue, used only for selection and focus. */
+  --brand: oklch(0.55 0.19 258);
+  --surface: oklch(0.975 0 0);
+  --shadow-pop: 0 1px 2px oklch(0 0 0 / 6%), 0 8px 24px -8px oklch(0 0 0 / 14%);
+  --sidebar: oklch(0.982 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
@@ -105,22 +111,22 @@
 
 .dark {
   --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --foreground: oklch(0.975 0 0);
+  --card: oklch(0.178 0 0);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: oklch(0.2 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --primary: oklch(0.922 0 0);
   --primary-foreground: oklch(0.205 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
+  --muted: oklch(0.235 0 0);
+  --muted-foreground: oklch(0.69 0 0);
+  --accent: oklch(0.25 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 13%);
   --ring: oklch(0.556 0 0);
   --positive: oklch(0.78 0.16 162);
   --negative: oklch(0.72 0.17 20);
@@ -136,14 +142,17 @@
   --chart-8: oklch(0.7 0.16 55);
   --chart-9: oklch(0.62 0.15 140);
   --chart-10: oklch(0.6 0.14 285);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar: oklch(0.162 0 0);
+  --sidebar-foreground: oklch(0.975 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent: oklch(0.225 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-border: oklch(1 0 0 / 7%);
   --sidebar-ring: oklch(0.556 0 0);
+  --brand: oklch(0.68 0.16 255);
+  --surface: oklch(0.165 0 0);
+  --shadow-pop: 0 1px 0 oklch(1 0 0 / 4%) inset, 0 12px 32px -12px oklch(0 0 0 / 60%);
 }
 
 @layer base {
@@ -156,9 +165,82 @@
   html {
     @apply font-sans;
   }
+  /* In the base layer so a component's own outline/ring utilities win without `!`. */
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
 }
 .skip-link { position: fixed; top: -5rem; left: 1rem; z-index: 100; padding: .75rem 1rem; background: var(--background); color: var(--foreground); border: 2px solid var(--ring); border-radius: .5rem; }
 .skip-link:focus { top: 1rem; }
 button:not(:disabled), [role="button"] { cursor: pointer; }
-:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+/* ---------- Type & numbers ---------- */
+body { font-feature-settings: "cv11", "ss01"; }
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum", "cv11"; }
+
+/* ---------- Motion ----------
+   One easing family. `--ease-out` for things arriving, `--ease-spring` for
+   things the user caused (a toggle, a drop-in), never for ambient motion. */
+:root {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 140ms;
+  --dur-base: 220ms;
+  --dur-slow: 420ms;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes drop-in { 0% { opacity: 0; transform: translateY(-6px) scale(0.97); } 70% { opacity: 1; transform: translateY(1px) scale(1.005); } 100% { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Route entrance: applied once per navigation by app/template.tsx. */
+.page-enter { animation: rise var(--dur-slow) var(--ease-out) both; }
+/* Entrance for a single block. */
+.rise { animation: rise var(--dur-slow) var(--ease-out) both; animation-delay: calc(var(--i, 0) * 50ms); }
+/* Stagger direct children (first 8 get a delay; the rest arrive with the 8th). */
+.stagger > * { animation: rise var(--dur-slow) var(--ease-out) both; }
+.stagger > :nth-child(2) { animation-delay: 40ms; }
+.stagger > :nth-child(3) { animation-delay: 80ms; }
+.stagger > :nth-child(4) { animation-delay: 120ms; }
+.stagger > :nth-child(5) { animation-delay: 160ms; }
+.stagger > :nth-child(6) { animation-delay: 200ms; }
+.stagger > :nth-child(7) { animation-delay: 240ms; }
+.stagger > :nth-child(n + 8) { animation-delay: 280ms; }
+/* Something the user just caused to appear: a saved banner, a new row, a popover. */
+.drop-in { animation: drop-in var(--dur-slow) var(--ease-spring) both; }
+/* Press feedback for custom clickable surfaces (Button already has its own). */
+.pressable { transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+.pressable:active { transform: scale(0.985); }
+/* Hover lift for clickable rows/tiles: background only, never a shadow bloom. */
+.hoverable { transition: background-color var(--dur-fast) var(--ease-out); }
+.hoverable:hover { background-color: color-mix(in oklch, var(--foreground) 4%, transparent); }
+
+/* Disclosure (<details>) body animates open where the browser supports it. */
+details.disclosure::details-content { block-size: 0; overflow: clip; opacity: 0; transition: block-size var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out), content-visibility var(--dur-base) allow-discrete; }
+details.disclosure[open]::details-content { block-size: auto; opacity: 1; }
+@supports (interpolate-size: allow-keywords) { :root { interpolate-size: allow-keywords; } }
+details.disclosure > summary { list-style: none; }
+details.disclosure > summary::-webkit-details-marker { display: none; }
+details.disclosure[open] > summary [data-chevron] { transform: rotate(90deg); }
+
+/* Range calendar: the incoming month slides a few px from the side it came from. */
+@keyframes cal-slide-next { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@keyframes cal-slide-prev { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+.cal-slide-next { animation: cal-slide-next var(--dur-base) var(--ease-out) both; }
+.cal-slide-prev { animation: cal-slide-prev var(--dur-base) var(--ease-out) both; }
+/* Indeterminate progress under a control while its navigation is pending. */
+@keyframes range-progress { from { transform: translateX(-100%) scaleX(0.4); } to { transform: translateX(100%) scaleX(0.4); } }
+.range-progress { animation: range-progress 900ms var(--ease-out) infinite; }
+
+/* Sliding indicator used by the sidebar and sub-tabs. */
+.nav-indicator { transition: transform var(--dur-base) var(--ease-out), width var(--dur-base) var(--ease-out), opacity var(--dur-fast); }
+
+/* Thin, quiet scrollbars inside the shell. */
+.scroll-quiet { scrollbar-width: thin; scrollbar-color: color-mix(in oklch, var(--foreground) 15%, transparent) transparent; }
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cal-slide-next, .cal-slide-prev { animation: none; }
+  .range-progress { animation: none; opacity: 0.6; }
+  .page-enter, .rise, .stagger > *, .drop-in { animation: fade var(--dur-fast) linear both !important; animation-delay: 0ms !important; }
+  .pressable:active { transform: none; }
+}
