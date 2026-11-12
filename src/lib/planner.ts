@@ -4,6 +4,9 @@ import { eq } from "drizzle-orm";
 import { getMonthlyTrend } from "@/lib/spending";
 import { getConfigCents } from "@/lib/config";
 import type { PlannerGoal } from "@/lib/planner-core";
+import { getGoalProgress, type GoalProgress } from "@/lib/goals";
+import { planWindow, type ProgressKind } from "@/lib/goals-core";
+import { isoDate } from "@/lib/format";
 
 /**
  * Load active goals + the data needed to resolve each one's current balance and
@@ -40,7 +43,12 @@ async function loadGoalContext() {
       .filter((a) => types.includes(a.type) && a.isAsset)
       .reduce((s, a) => s + a.currentBalanceCents, 0);
 
+  const today = isoDate(new Date());
+  const progress = await getGoalProgress(gs, today);
+
   const resolveLeafCurrent = (g: Goal): number => {
+    const measured = progress.get(g.id);
+    if (measured) return measured.currentCents;
     const ids = accountIdsByGoal.get(g.id);
     if (ids && ids.length) {
       return ids.reduce((s, id) => s + (accById.get(id)?.currentBalanceCents ?? 0), 0);
@@ -52,7 +60,7 @@ async function loadGoalContext() {
     return 0;
   };
 
-  return { gs, accountIdsByGoal, childrenOf, resolveLeafCurrent };
+  return { gs, accountIdsByGoal, childrenOf, resolveLeafCurrent, progress, today };
 }
 
 /**
@@ -84,6 +92,11 @@ export type GoalNode = {
   linkedAccountId: number | null;
   accountIds: number[];
   parentGoalId: number | null;
+  progressKind: ProgressKind;
+  taxYear: number | null;
+  manualProgressCents: number | null;
+  /** How a tax-year goal is measured, its deadline and notes; null for balance goals. */
+  progress: GoalProgress | null;
   children: GoalNode[];
 };
 
@@ -93,7 +106,8 @@ export type GoalNode = {
  * counting).
  */
 export async function getGoalsTree(): Promise<GoalNode[]> {
-  const { gs, accountIdsByGoal, childrenOf, resolveLeafCurrent } = await loadGoalContext();
+  const { gs, accountIdsByGoal, childrenOf, resolveLeafCurrent, progress } = await loadGoalContext();
+  const measure = (g: Goal) => ({ progressKind: g.progressKind, taxYear: g.taxYear, manualProgressCents: g.manualProgressCents });
 
   const leafNode = (g: Goal): GoalNode => ({
     id: g.id,
@@ -105,6 +119,8 @@ export async function getGoalsTree(): Promise<GoalNode[]> {
     linkedAccountId: g.linkedAccountId,
     accountIds: accountIdsByGoal.get(g.id) ?? [],
     parentGoalId: g.parentGoalId,
+    ...measure(g),
+    progress: progress.get(g.id) ?? null,
     children: [],
   });
 
@@ -124,6 +140,8 @@ export async function getGoalsTree(): Promise<GoalNode[]> {
         linkedAccountId: g.linkedAccountId,
         accountIds: accountIdsByGoal.get(g.id) ?? [],
         parentGoalId: null,
+        ...measure(g),
+        progress: null,
         children,
       };
     });
