@@ -221,3 +221,188 @@ export function cardCategoriesFor(finName: string | null, parentName?: string | 
 export const pctBp = (bp: number) => `${(bp / 100).toFixed(bp % 100 ? (bp % 10 ? 2 : 1) : 0)}%`;
 const formatCents = (c: number) => `$${(c / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 
+// ------------------------------------------------------------- ledger reads
+
+const today = () => format(new Date(), "yyyy-MM-dd");
+
+async function categoryIndex() {
+  const rows = await db.select({ id: categories.id, name: categories.name, kind: categories.kind, parentId: categories.parentId }).from(categories);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return rows.map((r) => ({ ...r, cats: cardCategoriesFor(r.name, r.parentId ? byId.get(r.parentId)?.name : null) }));
+}
+
+/**
+ * Card spend: outflows on accounts linked to a card that a rewards program would
+ * pay on. Transfers, payments, excluded and pending rows, interest and fees are not purchases.
+ */
+async function cardSpend(accountIds: number[], startDay: string, endDay: string) {
+  if (!accountIds.length) return [];
+  const start = new Date(`${startDay}T00:00:00`);
+  const end = new Date(`${endDay}T00:00:00`);
+  end.setDate(end.getDate() + 1);
+  const rows = await db.select({
+    id: transactions.id, accountId: transactions.accountId, postedAt: transactions.postedAt, amountCents: transactions.amountCents,
+    merchant: sql<string>`coalesce(nullif(${transactions.payeeNormalized}, ''), ${transactions.merchantRaw})`,
+    categoryName: categories.name, categoryKind: categories.kind, categoryId: transactions.categoryId,
+  }).from(transactions)
+    .leftJoin(categories, eq(categories.id, transactions.categoryId))
+    .where(and(
+      inArray(transactions.accountId, accountIds),
+      gte(transactions.postedAt, start), lt(transactions.postedAt, end), lt(transactions.amountCents, 0),
+      eq(transactions.isTransfer, false), eq(transactions.isExcluded, false), eq(transactions.isPending, false),
+    ))
+    .orderBy(asc(transactions.postedAt), asc(transactions.id));
+  return rows.filter((r) => !["transfer", "investment", "income"].includes(r.categoryKind ?? "expense") && r.categoryName !== "Fees & Charges")
+    .map((r) => ({ ...r, day: format(r.postedAt, "yyyy-MM-dd"), spendCents: -r.amountCents }));
+}
+
+/** Bonus spend each card has already used in the cap windows that contain `day`. */
+async function capUseOn(cards: CardView[], day: string): Promise<CapUse> {
+  const use: CapUse = new Map();
+  const capped = cards.filter((c) => c.accountId && c.rates.some((r) => r.capCents));
+  if (!capped.length) return use;
+  const index = new Map((await categoryIndex()).map((c) => [c.id, c.cats]));
+  const yearStart = `${day.slice(0, 4)}-01-01`;
+  const spend = await cardSpend(capped.map((c) => c.accountId!), yearStart, day);
+  for (const card of capped) {
+    for (const t of spend.filter((s) => s.accountId === card.accountId)) {
+      const bonus = bonusRate(card, (t.categoryId && index.get(t.categoryId)) || [], t.day);
+      if (!bonus?.capCents || capWindow(bonus, t.day).start !== capWindow(bonus, day).start) continue;
+      const key = capUseKey(card.id, bonus, day);
+      use.set(key, (use.get(key) ?? 0) + t.spendCents);
+    }
+  }
+  return use;
+}
+
+export type Resolved = { input: string; matchedBy: "fin category" | "card category" | "merchant" | "none"; finCategory: string | null; cats: CardCategory[] };
+
+/** A fin category, a card category ("dining"), or a merchant seen in the ledger, in that order. */
+export async function resolveQuery(q: { category?: string; merchant?: string }): Promise<Resolved> {
+  const index = await categoryIndex();
+  const text = (q.category ?? q.merchant ?? "").trim();
+  const lower = text.toLowerCase();
+  if (q.category) {
+    const fin = index.find((c) => c.name.toLowerCase() === lower);
+    if (fin) return { input: text, matchedBy: "fin category", finCategory: fin.name, cats: fin.cats };
+    const card = CARD_CATEGORIES.find((c) => c === lower || c === `${lower}s`);
+    if (card) return { input: text, matchedBy: "card category", finCategory: null, cats: [card] };
+  }
+  if (text) {
+    const like = `%${lower.replace(/[%_]/g, "")}%`;
+    const [top] = await db.select({ categoryId: transactions.categoryId, n: sql<number>`count(*)` }).from(transactions)
+      .where(and(sql`${transactions.categoryId} is not null`, sql`(lower(${transactions.payeeNormalized}) like ${like} or lower(${transactions.merchantRaw}) like ${like})`, lt(transactions.amountCents, 0)))
+      .groupBy(transactions.categoryId).orderBy(sql`count(*) desc`).limit(1);
+    const fin = top && index.find((c) => c.id === top.categoryId);
+    if (fin) return { input: text, matchedBy: "merchant", finCategory: fin.name, cats: fin.cats };
+  }
+  return { input: text, matchedBy: "none", finCategory: null, cats: [] };
+}
+
+export type BestCardQuery = { category?: string; merchant?: string; amountCents?: number; abroad?: boolean; date?: string };
+
+/** Ranked cards for one purchase; caps count bonus spend already on the card this period. */
+export async function bestCardFor(q: BestCardQuery) {
+  const day = q.date ?? today();
+  const [cards, query] = await Promise.all([listCards({ activeOnly: true }), resolveQuery(q)]);
+  const capUse = await capUseOn(cards, day);
+  return { query, day, abroad: !!q.abroad, ranked: rankCards(cards, { cats: query.cats, day, abroad: q.abroad, amountCents: q.amountCents, capUse }) };
+}
+export type BestCardResult = Awaited<ReturnType<typeof bestCardFor>>;
+
+type Tally = { spendCents: number; earned: number; best: number };
+const addTo = <K>(m: Map<K, Tally & Record<string, unknown>>, k: K, init: () => Tally & Record<string, unknown>, s: number, e: number, b: number) => {
+  const row = m.get(k) ?? init();
+  row.spendCents += s; row.earned += e; row.best += b;
+  m.set(k, row);
+};
+
+/**
+ * What card spend in [from, to] earned vs routing each purchase to the best
+ * card held. Both worlds track their own cap use, from the start of `from`'s
+ * year so a quarter half-spent before the range is respected. Portal-only and
+ * foreign-fee effects are ignored: the ledger does not say how a trip was booked.
+ */
+export async function missedRewards(range: { from: string; to: string }) {
+  const cards = await listCards({ activeOnly: true });
+  const byAccount = new Map(cards.filter((c) => c.accountId).map((c) => [c.accountId!, c]));
+  const index = new Map((await categoryIndex()).map((c) => [c.id, c.cats]));
+  const spend = await cardSpend([...byAccount.keys()], `${range.from.slice(0, 4)}-01-01`, range.to);
+  const actualUse: CapUse = new Map();
+  const bestUse: CapUse = new Map();
+  const consume = (use: CapUse, card: CardView, cats: CardCategory[], day: string, cents: number) => {
+    const bonus = bonusRate(card, cats, day);
+    if (!bonus?.capCents) return;
+    const key = capUseKey(card.id, bonus, day);
+    use.set(key, (use.get(key) ?? 0) + cents);
+  };
+  const byCategory = new Map<string, Tally & { bestCard: Map<string, number> }>();
+  const byMerchant = new Map<string, Tally & { used: Map<string, number>; bestCard: Map<string, number> }>();
+  const byCard = new Map<string, Tally>();
+  const total: Tally = { spendCents: 0, earned: 0, best: 0 };
+  for (const t of spend) {
+    const card = byAccount.get(t.accountId)!;
+    const cats = (t.categoryId && index.get(t.categoryId)) || [];
+    const base = { cats, day: t.day, amountCents: t.spendCents };
+    const actual = scoreCard(card, { ...base, capUse: actualUse });
+    const best = rankCards(cards, { ...base, capUse: bestUse })[0] ?? actual;
+    const earned = (t.spendCents * actual.valueBp) / 10_000;
+    const switchTo = best.valueBp > actual.valueBp ? cards.find((c) => c.id === best.cardId) ?? card : card;
+    const bestValue = (t.spendCents * scoreCard(switchTo, { ...base, capUse: bestUse }).valueBp) / 10_000;
+    consume(actualUse, card, cats, t.day, t.spendCents);
+    consume(bestUse, switchTo, cats, t.day, t.spendCents);
+    if (t.day < range.from) continue;
+    const bestName = switchTo.name;
+    total.spendCents += t.spendCents; total.earned += earned; total.best += bestValue;
+    const cat = t.categoryName ?? "Uncategorized";
+    addTo(byCategory, cat, () => ({ spendCents: 0, earned: 0, best: 0, bestCard: new Map() }), t.spendCents, earned, bestValue);
+    const bc = byCategory.get(cat)!.bestCard;
+    bc.set(bestName, (bc.get(bestName) ?? 0) + bestValue - earned);
+    const merchant = t.merchant || "(unknown)";
+    addTo(byMerchant, merchant, () => ({ spendCents: 0, earned: 0, best: 0, used: new Map(), bestCard: new Map() }), t.spendCents, earned, bestValue);
+    const m = byMerchant.get(merchant)!;
+    m.used.set(card.name, (m.used.get(card.name) ?? 0) + bestValue - earned);
+    m.bestCard.set(bestName, (m.bestCard.get(bestName) ?? 0) + bestValue - earned);
+    addTo(byCard, card.name, () => ({ spendCents: 0, earned: 0, best: 0 }), t.spendCents, earned, bestValue);
+  }
+  /** The card carrying the most missed value: the one used wrongly, and the one that should have been. */
+  const top = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const cents = (t: Tally) => ({ spendCents: t.spendCents, earnedCents: Math.round(t.earned), bestCents: Math.round(t.best), missedCents: Math.round(t.best - t.earned) });
+  return {
+    from: range.from, to: range.to,
+    totals: cents(total),
+    byCategory: [...byCategory].map(([category, t]) => ({ category, ...cents(t), bestCard: top(t.bestCard) }))
+      .sort((a, b) => b.missedCents - a.missedCents || b.spendCents - a.spendCents),
+    topMerchants: [...byMerchant].map(([merchant, t]) => ({ merchant, usedCard: top(t.used), bestCard: top(t.bestCard), ...cents(t) }))
+      .filter((m) => m.missedCents > 0).sort((a, b) => b.missedCents - a.missedCents).slice(0, 10),
+    byCard: [...byCard].map(([card, t]) => ({ card, ...cents(t) })),
+    unlinkedCards: cards.filter((c) => !c.accountId).map((c) => c.name),
+  };
+}
+export type MissedRewards = Awaited<ReturnType<typeof missedRewards>>;
+
+/** Everything an assistant needs to answer "which card?", as one compact value plus a text rendering. */
+export async function cardsContext(day = today()) {
+  const cards = await listCards({ activeOnly: true });
+  const uses = bestUses(cards, day);
+  const accountNames = new Map((await db.select({ id: accounts.id, name: accounts.name }).from(accounts)).map((a) => [a.id, a.name]));
+  const summary = cards.map((c) => ({
+    name: c.name, issuer: c.issuer, account: c.accountId ? accountNames.get(c.accountId) ?? `#${c.accountId}` : null,
+    currency: c.rewardCurrency, base: pctBp(c.baseRateBp),
+    bonuses: c.rates.filter((r) => activeOn(r, day) || (r.from ?? "") > day).map((r) => [
+      `${pctBp(r.rateBp)} ${r.category}`, r.via && `via ${r.via}`, r.capCents && `cap ${formatCents(r.capCents)}/${r.period ?? "year"}`,
+      (r.from || r.to) && `${r.from ?? ""}..${r.to ?? ""}`, r.activation && "activate", r.note,
+    ].filter(Boolean).join(" ")),
+    annualFee: formatCents(c.annualFeeCents), foreignFee: c.foreignFeeBp == null ? "unknown" : pctBp(c.foreignFeeBp),
+    useFor: uses.get(c.id) ?? [], perks: c.perks, note: c.note,
+  }));
+  const text = [`Credit cards as of ${day} (rates are cash-equivalent; abroad, prefer a card with a known 0% foreign fee):`,
+    ...summary.map((s) => `- ${s.name}${s.account ? ` [${s.account}]` : ""}: ${s.base} base${s.bonuses.length ? `; ${s.bonuses.join("; ")}` : ""}; fee ${s.annualFee}/yr; FX ${s.foreignFee}. Use for: ${s.useFor.join(", ") || "nothing (another card wins everywhere)"}.`),
+  ].join("\n");
+  return { day, cards: summary, text };
+}
+
+/** Expense categories in the ledger, for the "which card?" picker. */
+export async function pickerCategories(): Promise<string[]> {
+  return (await categoryIndex()).filter((c) => c.kind === "expense").map((c) => c.name).sort();
+}
