@@ -255,3 +255,160 @@ export function decide(row: Row, ctx: Context): Choice | null {
   return null;
 }
 
+/* ----------------------------------- AI ------------------------------------- */
+
+/**
+ * The descriptor as the model sees it: the brand without memos or codes, and
+ * a person's name replaced by who they are to the row ("Zelle from a person").
+ */
+export function describe(raw: string, transfer: boolean): string {
+  // Bank P2P formats vary too much to find the name reliably ("VENMO *Jane Doe",
+  // "ZELLE TO DOE JANE ON 11/02"): send only the channel.
+  const p2p = P2P.exec(raw);
+  if (p2p) {
+    const dir = /\bfrom\b/i.test(raw) ? " from a person" : /\bto\b/i.test(raw) ? " to a person" : " payment";
+    return p2p[1][0].toUpperCase() + p2p[1].slice(1).toLowerCase() + dir;
+  }
+  const person = detectPerson(raw, { transfer });
+  if (person) {
+    const how = person.channel ? person.channel[0].toUpperCase() + person.channel.slice(1).toLowerCase() : "Transfer";
+    return `${how}${person.direction ? ` ${person.direction}` : ""} a person`;
+  }
+  return raw
+    .replace(/\s+for\s+"[^"]*"?;?/gi, " ")
+    .replace(/\s*\bconf(?:irmation)?\s*#\s*[\w-]*/gi, " ")
+    .replace(/\b[\w.+-]+@[\w-]+\.[\w.]+\b/g, " ")
+    .replace(/\b\d{6,}\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+const DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** One line per row: the descriptor, amount, account type and timing. No account names, memos or notes. */
+export function aiLine(row: Row): string {
+  const amt = `${row.amountCents < 0 ? "-" : "+"}$${(Math.abs(row.amountCents) / 100).toFixed(2)}`;
+  const tags = [
+    `account: ${row.accountType}`,
+    DAY[row.postedAt.getUTCDay()],
+    row.amountCents % 10000 === 0 && row.amountCents !== 0 ? "round amount" : "",
+    row.isRecurring ? "recurring" : "",
+    row.counterpartType ? `matching opposite row in own ${row.counterpartType} account` : "",
+  ].filter(Boolean);
+  // Memos and notes never leave: free text names people in ways no detector catches.
+  return `${row.id}. ${describe(row.merchantRaw, row.isTransfer)} ${amt} · ${tags.join(" · ")}`;
+}
+
+/** Leaves, plus top-level categories that have no children. Parents with children are only a last resort. */
+export function allowedCategories(cats: Cat[]): { leaves: Cat[]; parents: Cat[] } {
+  const hasKids = new Set(cats.filter((c) => c.parentId != null).map((c) => c.parentId));
+  return { leaves: cats.filter((c) => !hasKids.has(c.id)), parents: cats.filter((c) => hasKids.has(c.id)) };
+}
+
+export function systemPrompt(cats: Cat[], examples: string[]): string {
+  const { leaves, parents } = allowedCategories(cats);
+  const parentName = new Map(cats.map((c) => [c.id, c.name]));
+  const list = leaves
+    .map((c) => `- ${c.name}${c.parentId != null ? ` (under ${parentName.get(c.parentId)})` : ""} [${c.kind}]`)
+    .join("\n");
+  return [
+    "You file personal bank and card transactions into categories. Choose exactly one category for every row, copied verbatim from the allowed list.",
+    "",
+    "Allowed categories (prefer these specific ones):",
+    list,
+    "",
+    `Use a broad parent only when no specific category fits: ${parents.map((c) => c.name).join(", ")}.`,
+    "",
+    "How to read a row: a negative amount is money out, positive is money in. An income category never applies to money out.",
+    "\"account: credit\" is a card; a positive card row that is not a refund is a payment. Rows in brokerage, ira, hsa or crypto accounts are investment activity unless clearly a fee or tax.",
+    "A matching opposite row in another own account means money moved between the user's accounts: use a transfer category.",
+    "\"Zelle/Venmo to a person\" is a payment to someone; choose from the amount and context (split meal, rent, gift) and the user's examples.",
+    "Restaurants are sit-down meals; fast food and counter service are Fast Food; cafes, boba and tea shops are Coffee Shops; supermarkets and grocery stores are Groceries.",
+    "Return a confidence from 0 to 1 for each row: how sure you are, not how important the row is. Always return a category even when unsure.",
+    examples.length ? `\nHow this user files their own merchants:\n${examples.join("\n")}` : "",
+  ].join("\n");
+}
+
+export function jsonSchema(names: string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "integer" },
+            category: { type: "string", enum: names },
+            confidence: { type: "number" },
+          },
+          required: ["id", "category", "confidence"],
+        },
+      },
+    },
+    required: ["results"],
+  };
+}
+
+const AiResult = z.object({
+  results: z.array(z.object({ id: z.coerce.number().int(), category: z.string(), confidence: z.coerce.number() }).loose()),
+}).loose();
+
+export type Validated = { accepted: { id: number; categoryId: number; confidence: number }[]; rejected: { id: number; why: string }[] };
+
+/**
+ * Keep only answers naming a row that was asked about and a category that
+ * exists, once per row. An income category on money out is refused: that is
+ * the one mistake that silently inflates earnings.
+ */
+export function validateAi(raw: unknown, asked: Pick<Row, "id" | "amountCents" | "isTransfer">[], byName: Map<string, Cat>): Validated {
+  const parsed = AiResult.safeParse(raw);
+  const out: Validated = { accepted: [], rejected: [] };
+  if (!parsed.success) return { accepted: [], rejected: asked.map((r) => ({ id: r.id, why: "unreadable reply" })) };
+  const rows = new Map(asked.map((r) => [r.id, r]));
+  const lower = new Map([...byName.values()].map((c) => [c.name.toLowerCase(), c]));
+  const seen = new Set<number>();
+  for (const r of parsed.data.results) {
+    const row = rows.get(r.id);
+    if (!row || seen.has(r.id)) continue;
+    const cat = byName.get(r.category) ?? lower.get(r.category.trim().toLowerCase());
+    if (!cat) { out.rejected.push({ id: r.id, why: `unknown category "${r.category}"` }); continue; }
+    if (cat.kind === "income" && row.amountCents < 0) { out.rejected.push({ id: r.id, why: "income category on money out" }); continue; }
+    if (row.isTransfer && cat.kind !== "transfer") { out.rejected.push({ id: r.id, why: "non-transfer category on a transfer" }); continue; }
+    seen.add(r.id);
+    out.accepted.push({ id: r.id, categoryId: cat.id, confidence: Math.max(0, Math.min(1, r.confidence)) });
+  }
+  for (const r of asked) if (!seen.has(r.id) && !out.rejected.some((x) => x.id === r.id)) out.rejected.push({ id: r.id, why: "no answer" });
+  return out;
+}
+
+/**
+ * Few-shot lines from the user's own filing: one or two merchants per
+ * category, people's names left out. Manual corrections first.
+ */
+export function examples(rows: { merchantRaw: string; amountCents: number; category: string; source: string }[], perCategory = 2, cap = 40): string[] {
+  const order = (s: string) => (s === "manual" ? 0 : s === "rule" ? 1 : 2);
+  const taken = new Map<string, Set<string>>();
+  const out: string[] = [];
+  for (const r of [...rows].sort((a, b) => order(a.source) - order(b.source))) {
+    if (order(r.source) > 1 || P2P.test(r.merchantRaw) || detectPerson(r.merchantRaw)) continue;
+    const brand = describe(r.merchantRaw, false);
+    const seen = taken.get(r.category) ?? new Set<string>();
+    if (seen.size >= perCategory || seen.has(brand.toLowerCase())) continue;
+    seen.add(brand.toLowerCase());
+    taken.set(r.category, seen);
+    out.push(`- ${brand} (${r.amountCents < 0 ? "out" : "in"}) -> ${r.category}`);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+/** Message for the toast and the CLI: what was filed, and what still needs the user. */
+export function summaryMessage(r: { total: number; categorized: number; left: number; stopped?: boolean; note?: string }): string {
+  if (r.total === 0) return "Everything is already categorized";
+  const head = r.stopped ? `Stopped. Categorized ${r.categorized}` : `Categorized ${r.categorized}`;
+  return `${head}, ${r.left} left for you${r.note ? `. ${r.note}` : ""}`;
+}
