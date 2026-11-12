@@ -159,7 +159,7 @@ export async function getEarningsWorkspace(requestedMonth?: string): Promise<Ear
 
 export type InvestmentActivity = WorkspaceTransaction & { activityKind: InvestmentActivityKind; activityLabel: string; displayAmountCents: number; sourceAccountName: string | null; isInternalTransfer: boolean };
 export type InvestmentAccount = { id: number; name: string; type: string; balanceCents: number; institution: string | null; activity: InvestmentActivity[]; snapshots: { date: string; valueCents: number }[] };
-export type InvestmentsWorkspace = { totalCents: number; accounts: InvestmentAccount[]; byType: PieSlice[]; trend: TrendPoint[]; activity: InvestmentActivity[]; contributionCents: number; contributionCount: number; investmentIncomeCents: number; withdrawalCents: number; feeCents: number };
+export type InvestmentsWorkspace = { totalCents: number; accounts: InvestmentAccount[]; byType: PieSlice[]; trend: TrendPoint[]; activity: InvestmentActivity[] };
 
 /** Investment balances are authoritative account/snapshot values. Investment
  * transactions are activity only; contributions and withdrawals never become spending.
@@ -170,7 +170,7 @@ export async function getInvestmentsWorkspace(): Promise<InvestmentsWorkspace> {
     with: { institution: true }, orderBy: [desc(accounts.currentBalanceCents)],
   });
   const ids = investmentAccounts.map((a) => a.id);
-  if (!ids.length) return { totalCents: 0, accounts: [], byType: [], trend: [], activity: [], contributionCents: 0, contributionCount: 0, investmentIncomeCents: 0, withdrawalCents: 0, feeCents: 0 };
+  if (!ids.length) return { totalCents: 0, accounts: [], byType: [], trend: [], activity: [] };
   const [activityRows, snapshots] = await Promise.all([
     db.select({ id: transactions.id, accountId: transactions.accountId, accountName: accounts.name, amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, postedAt: transactions.postedAt, categoryName: sql<string>`COALESCE(${categories.name}, 'Uncategorized')`, categoryKind: categories.kind, categoryId: transactions.categoryId, transferPairTxnId: transactions.transferPairTxnId, isTransfer: transactions.isTransfer })
       .from(transactions).innerJoin(accounts, eq(transactions.accountId, accounts.id)).leftJoin(categories, eq(transactions.categoryId, categories.id))
@@ -211,11 +211,6 @@ export async function getInvestmentsWorkspace(): Promise<InvestmentsWorkspace> {
       activity: activity.filter((row) => row.accountId === account.id), snapshots: snapshots.filter((row) => row.accountId === account.id),
     })),
     trend, activity,
-    contributionCents: activity.filter((row) => row.activityKind === "contribution").reduce((sum, row) => sum + contributionAmountCents(row.amountCents), 0),
-    contributionCount: activity.filter((row) => row.activityKind === "contribution").length,
-    investmentIncomeCents: activity.filter((row) => row.activityKind === "investment_income").reduce((sum, row) => sum + Math.max(row.amountCents, 0), 0),
-    withdrawalCents: activity.filter((row) => row.activityKind === "withdrawal").reduce((sum, row) => sum + Math.abs(row.amountCents), 0),
-    feeCents: activity.filter((row) => row.activityKind === "fee").reduce((sum, row) => sum + Math.abs(row.amountCents), 0),
   };
 }
 
