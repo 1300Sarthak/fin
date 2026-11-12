@@ -18,6 +18,14 @@ export type Args = {
  * what lets `--months` with no value be an error rather than a default.
  */
 export const BOOLEAN_FLAGS = new Set([
+  "upcoming",
+  "abroad",
+  "catch-all",
+  "backfill",
+  "dry-run",
+  "no-ai",
+  "log",
+  "recheck-transfers",
   "json", "help", "all", "explain", "undo", "pin", "open", "full", "force",
   "for-agent", "share-with-agent", "allow-remote", "include-private-context",
   "run", "with-context",
