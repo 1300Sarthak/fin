@@ -233,9 +233,12 @@ September 2026 by category
 ```
 
 `fin allowance` turns a monthly budget into a number you can act on today,
-after subtracting bills already committed for the rest of the month. Set the
-budget once — `fin config monthly_budget_cents 300000` for the $3,000 below;
-with none set the command says so and stops:
+after subtracting bills already committed for the rest of the month. The
+budget is the sum of your budget groups when any exist (`fin budgets set Food
+500 --categories "Groceries,Restaurants"`, `fin budgets set Everything 2500
+--catch-all`, `fin budgets rm Food`; the output then adds a per-group block);
+otherwise the older single number, `fin config monthly_budget_cents 300000` for
+the $3,000 below. With neither set the command says so and stops:
 
 ```
 $ fin allowance
@@ -286,56 +289,69 @@ Driving this from an agent:
   fin note "…" --pin                                so the next session starts knowing it
 
 Start here:
-  brief         session primer: balances, burn, and saved context [--months N] [--to YYYY-MM]
-  context       local aggregate snapshot and planning context, as one JSON object
-  doctor        which keys and database are configured; contacts nothing
+  brief           session primer: balances, burn, and saved context [--months N] [--to YYYY-MM]
+  context         local aggregate snapshot and planning context, as one JSON object
+  doctor          which keys and database are configured; contacts nothing
 
 What happened to the money:
-  overview      net worth, spendable cash, and this month's flow [YYYY-MM]
-  accounts      balances per account [--all to include zero balances]
-  burn          what you truly earned, spent, and saved [FROM] [TO] [--explain] [--kind K]
-  spending      spending breakdown [YYYY-MM] [--by category|merchant|card] [--limit N]
-  txns          search transactions [TEXT] [--month M] [--account ID] [--type income|expense]
-  earnings      income sources for a month [YYYY-MM]
-  investments   invested balances, contributions, and income
-  holdings      what each investment account actually holds [--account ID] [--symbol NVDA]
-  transfers     money moved between your own accounts [--limit N]
-  refunds       refunds and what they reverse [--limit N]
-  trend         income vs spending by month [--months N]
-  budgets       budget limits against actuals [YYYY-MM]
-  history       net worth and savings per period [--period month|week] [--limit N]
-  allowance     what you can spend per day for the rest of the month [--month YYYY-MM]
-  cash          physical cash: `fin cash`, `fin cash add 40 tips`, `fin cash set 500` [--limit N]
+  overview        net worth, spendable cash, and this month's flow [YYYY-MM]
+  accounts        balances per account [--all to include zero balances]
+  burn            what you truly earned, spent, and saved [FROM] [TO] [--explain] [--kind K]
+  spending        spending for a range: made / spent / net, burn rate, daily average, projected [YYYY-MM] [--period this-month|last-month|ytd|12m|all | --from D --to D] [--by category|merchant|card|month] [--limit N]
+  txns            search transactions [TEXT] [--from D] [--to D] [--month M] [--category NAME|ID] [--merchant TEXT] [--account ID] [--kind income|expense|cashflow|transfer] [--source INCOME_SOURCE] [--limit N]; same filter as /transactions
+  earnings        income sources for a month [YYYY-MM]
+  investments     invested balances, plus contributions / deposits / dividends & interest / moved out / fees for a range, as /investments shows them [--period P | --from D --to D] (default ytd)
+  holdings        what each investment account actually holds [--account ID] [--symbol NVDA]
+  transfers       money moved between your own accounts [--limit N]
+  refunds         refunds and what they reverse [--limit N]
+  trend           income vs spending by month [--months N]
+  history         net worth and savings per period [--period month|week] [--limit N]
+  allowance       what you can spend per day for the rest of the month; sums budget groups when set [--month YYYY-MM]
+  cash            physical cash: `fin cash`, `fin cash add 40 tips`, `fin cash set 500` [--limit N]
+  income          pay per job: W-2 / self-employment / nontaxable, owed and unmatched deposits [YEAR] [--source NAME]; any range: `--from YYYY-MM[-DD] --to … [--by week|month|quarter|year] [--basis paid|work] [--source A,B,Other]`; `log SOURCE --month YYYY-MM --hours N [--amount X] [--paid YYYY-MM-DD] [--txn ID]`; `earnings [--from D] [--to D]` for the Earnings tab
+  activity        investment history: what was bought/sold/paid in, when, and with what money [--account ID] [--symbol X] [--kind buy|sell|dividend|interest|contribution|transfer-in|transfer-out|fee|other] [--from YYYY-MM[-DD]] [--to …] [--all] [--limit N]
+  points          loyalty balances and estimated value; `fin points set NAME BALANCE [--kind card|airline|hotel|other] [--cpp 1.1]`
+  trips           booked and past trips, nights per program this year [--upcoming]; `fin trips add --kind flight|hotel|car|other --provider P --title T --start YYYY-MM-DD [--end D] [--cost X] [--program NAME] [--via V]`
+  cards           credit cards, rates, fees, what to use each for; `fin cards set NAME [--base 3] [--rate dining=3,drugstores=3] [--fee 0] [--fx 3|unknown] [--account ID|none] [--issuer T] [--currency cash|"chase ur"] [--active yes|no] [--note T]`; `fin cards remove NAME`; `fin cards missed [--from YYYY-MM] [--to YYYY-MM]`
 
 What is coming:
-  upcoming      bills due and the balance forecast [--days N]
-  recurring     recurring charges, their cadence, and trials ending
-  reminders     cancellation reminders: `list`, `add NAME YYYY-MM-DD`, `done ID` [--all]
-  goals         goal progress, free cash flow, and debts
-  anomalies     unusual spending this month [--month YYYY-MM]
+  upcoming        bills due and the balance forecast [--days N]
+  recurring       recurring charges, their cadence, and trials ending
+  reminders       cancellation reminders: `list`, `add NAME YYYY-MM-DD`, `done ID` [--all]
+  goals           goal progress, free cash flow, and debts
+  anomalies       unusual spending this month [--month YYYY-MM]
 
 Planning inputs and files:
-  plan          financial plan [show|schema|set --file PROFILE.json] [--for-agent]
-  taxes         tax opportunities [show|schema|set --file TAX.json]
-  import        read a planning spreadsheet PATH.csv|xlsx; imports no transactions [--share-with-agent]
-  spreadsheets  planning uploads [list|share ID|unshare ID|remove ID] [--for-agent]
-  export        export finance data to XLSX --out PATH.xlsx [--force]
+  budgets         budget groups vs actuals, pace and per-day left [YYYY-MM] · set NAME AMOUNT --categories "A,B" | --catch-all · rm NAME
+  plan            financial plan [show|schema|set --file PROFILE.json] [--for-agent]
+  points-vs-cash  should this booking use points? `fin points-vs-cash 104 9436 --program chase [--hotel wyndham [--direct PRICE] [--stays N]]`
+  business        Schedule C expenses and SEP room [YEAR]; `fin business add "ITEM" --amount 249.99|unknown [--date D] [--paid-with T] [--pct 0-100] [--category C] [--txn ID] [--note T] [--year Y]`
+  sep             SEP IRA max, SE tax, and Solo 401(k) alternative [YEAR] [--w2-deferrals DOLLARS]
+  card-for        which card for this purchase? `fin card-for Restaurants|MERCHANT [--abroad] [--amount 40] [--date YYYY-MM-DD]`
+  take-home       2026 after tax: W-2 gross rebuilt from paychecks, federal/FICA/SE/CA tax, set-aside, where the money went [YEAR] [--w2-gross X]; `set [--salary X] [--full-time YYYY-MM-DD] [--k401 pretax|roth] [--k401-pct N] [--hsa-payroll yes|no] [--periods N] [--ca-allowances N] [--project yes|no] [--ytd-gross X --as-of YYYY-MM-DD] [--deferrals X] [--fed-withheld X] [--ca-withheld X] [--expected-se X]` (none clears)
+  taxes           tax opportunities [show|schema|set --file TAX.json]
+  import          read a planning spreadsheet PATH.csv|xlsx; imports no transactions [--share-with-agent]
+  spreadsheets    planning uploads [list|share ID|unshare ID|remove ID] [--for-agent]
+  export          export finance data to XLSX --out PATH.xlsx [--force]; with --month YYYY-MM, one month with splits and the audit log
 
 Correcting the ledger:
-  cat           fix a category and remember it: `fin cat 412 "Public Transit"`
-  exclude       drop a row from every total, keeping it visible: `fin exclude 410` [--undo]
-  refund-mark   flag money-in as a refund: `fin refund-mark 400 --reverses 222` [--undo]
-  pending       pending holds, and which already settled twice [--days N]
-  note          remember something: `fin note "…" --pin --kind fact|decision|todo|question`
+  cat             fix a category and remember it: `fin cat 412 "Public Transit"`
+  exclude         drop a row from every total, keeping it visible: `fin exclude 410` [--undo]
+  refund-mark     flag money-in as a refund: `fin refund-mark 400 --reverses 222` [--undo]
+  split           count only your share of a shared purchase: `fin split 412 21.00` [--undo]
+  changes         audit log of assistant and split edits [--month YYYY-MM]; every proposal/apply/undo/discard with the exact command: [--all [--limit N]]
+  pending         pending holds, and which already settled twice [--days N]
+  note            remember something: `fin note "…" --pin --kind fact|decision|todo|question`
 
 Research (asks an AI provider, and only with --run):
-  research      research QUESTION [--run] [--with-context] [--provider anthropic|openai|nim] [--steps 2-6]; also status|tools|schema
+  research        research QUESTION [--run] [--with-context] [--provider anthropic|openai|nim] [--steps 2-6]; also status|tools|schema
 
 Setup and escape hatches:
-  sync          pull fresh data from SimpleFIN [--full also re-detects and categorises]
-  categorize    categorise uncategorised transactions [--limit N]
-  config        read or write settings: `fin config` lists, `fin config KEY` reads one, `fin config KEY VALUE` writes
-  sql           read-only SQL escape hatch: `fin sql "select …"`
+  auth            web sign-in: `status` (this shell's env) or `revoke` to sign out every web session
+  sync            pull fresh data from SimpleFIN [--full also re-detects and categorises]
+  categorize      categorise uncategorised transactions [--limit N]
+  config          read or write settings: `fin config` lists, `fin config KEY` reads one, `fin config KEY VALUE` writes
+  sql             read-only SQL escape hatch: `fin sql "select …"`
 
   Everything is local except `research --run`, `sync`, `categorize`, and `cash` given free
   text — those four call a provider. `fin doctor` checks configuration without contacting one.
@@ -343,6 +359,56 @@ Setup and escape hatches:
   balance snapshot. `fin <command> --help` states the network and the writes for that command.
   --json prints one JSON value on stdout and nothing else; failures print to stderr and exit 1.
   --help on any command lists the flags it accepts. Any [YYYY-MM] positional also accepts --month.
+```
+
+### Newer commands, by question
+
+Every page in the web app has a twin here; these arrived with the
+range-picker rebuild. Each still takes `--json`, and `fin <command> --help`
+lists its flags.
+
+```
+# Spending and transactions — the same filters the pages link to
+fin spending --period ytd --by month          # this-month|last-month|ytd|12m|all, or --from D --to D
+fin spending --from 2026-03-01 --to 2026-03-31 --by card
+fin txns --from 2026-10-01 --to 2026-10-31 --category Restaurants --account 4
+fin txns --kind income --source "Acme"     # also --merchant TEXT, free TEXT, --limit N
+fin budgets 2026-11                           # groups vs actuals, pace, per-day left
+fin budgets set Food 500 --categories "Groceries,Restaurants"
+fin allowance                                 # sums the groups above when set
+
+# Income
+fin income 2026                               # per job: W-2 / self-employment / nontaxable, owed, unmatched
+fin income --from 2026-01 --to 2026-06 --by month --basis work --source "Acme,Other"
+fin income log "Tutoring" --month 2026-10 --hours 12 --amount 480 --paid 2026-11-03
+fin income earnings --from 2026-01-01         # the Earnings tab
+fin take-home                                 # 2026 after tax: gross from paychecks, fed/FICA/SE/CA, set-aside
+fin take-home set --salary 120000 --k401 pretax --k401-pct 6 --hsa-payroll yes
+
+# Investments
+fin activity --symbol VTI --kind buy --from 2026-01   # bought/sold/paid in, and with what money
+
+# Taxes and side business
+fin business 2026                             # Schedule C expenses and SEP room
+fin business add "Monitor" --amount 249.99 --date 2026-04-02 --pct 80 --category equipment
+fin sep 2026 --w2-deferrals 23500             # SEP IRA max, SE tax, Solo 401(k) alternative
+
+# Cards and points
+fin cards                                     # rates, fees, what each card is for
+fin cards set "Freedom Unlimited" --base 1.5 --rate dining=3,drugstores=3 --fee 0 --account 3
+fin cards missed --from 2026-01               # where a better card would have earned more
+fin card-for Restaurants --amount 40          # or a merchant name; --abroad weighs FX fees
+fin points                                    # balances and estimated value
+fin points set "Chase UR" 84000 --kind card --cpp 1.25
+fin points-vs-cash 104 9436 --program chase   # cash price, points price
+fin points-vs-cash 120 15000 --program wyndham --hotel wyndham --direct 115 --stays 2
+fin trips --upcoming
+fin trips add --kind hotel --provider Hyatt --title "Austin" --start 2026-12-04 --end 2026-12-07 --cost 540
+
+# Audit and sign-in
+fin changes --all --limit 50                  # every proposal/apply/undo/discard with its exact command
+fin auth status                               # whether this shell's env enables web sign-in
+fin auth revoke                               # sign out every web session
 ```
 
 Full reference, including the alias table and the JSON contract:
@@ -473,7 +539,7 @@ A research run cannot grow without limit. From `RESEARCH_LIMITS` in
 | Output tokens per model call | 1,200 |
 | Characters per tool result | 7,000, then truncated |
 | Total conversation characters | 42,000, then the run stops and says so |
-| Wall clock | 90 seconds |
+| Wall clock | 4 minutes; tool steps stop 1 minute early so the last call can summarise what was gathered (answer marked limited) |
 
 Identical tool calls are cached within a run, a tool batch larger than the
 remaining budget is refused, and every source URL is filtered to `https` with
@@ -614,7 +680,7 @@ Research setup · checked locally, no API calls
   Default AI     none — add an AI provider key
 
 Runs send your question to one selected AI provider. Aggregate dashboard data and holdings are opt-in per run; saved planning/tax inputs and spreadsheets additionally require their sharing switches. Nothing is sent by this status check.
-  AI: ANTHROPIC_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY. Optional models: ANTHROPIC_MODEL / OPENAI_MODEL / NIM_MODEL.
+  AI: ANTHROPIC_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY. Optional models: ANTHROPIC_MODEL / OPENAI_MODEL / NIM_MODEL; NIM research and the assistant use ASSISTANT_MODEL.
   Without --run, fin research only prints what a run would cost and send.
   Examples: fin research "Compare AAPL and MSFT cash flow" --json
             fin research "Review my reserve plan" --run --with-context --json
@@ -630,11 +696,19 @@ Runs send your question to one selected AI provider. Aggregate dashboard data an
 | `ALPHAVANTAGE_API_KEY` | The research assistant's `stock_data` tool: quotes, company overviews, statements, earnings, news, insider trades | [alphavantage.co/support/#api-key](https://www.alphavantage.co/support/#api-key) | No — the assistant works without it, with fewer tools |
 | `EXA_API_KEY` | The research assistant's public-source search, restricted to `sec.gov` for filings and `irs.gov` for tax topics | [dashboard.exa.ai/api-keys](https://dashboard.exa.ai/api-keys) | No |
 | `DATABASE_URL` | Which database file to use | — | Defaults to `file:finance.db` |
+| `FIN_PASSWORD_HASH` | Web sign-in. Output of `bun run scripts/hash-password.ts` | — | Unset: only loopback requests are served (dev) |
+| `FIN_SESSION_SECRET` | Signs session cookies; 32+ random characters. Changing it signs everyone out | `openssl rand -base64 48` | Yes, when `FIN_PASSWORD_HASH` is set |
+| `FIN_COOKIE_SECURE` | `1` forces the Secure cookie flag (TLS proxy in front, plain HTTP to the app), `0` forbids it | — | No — inferred from the request |
+| `FIN_ALLOW_NO_AUTH` | `loopback` lets a production build run without a password, loopback requests only | — | No |
+| `FIN_PRIVATE_NAMES` | Extra names (comma separated) the assistant pseudonymises before anything reaches a model, e.g. family members | — | No |
 
 Model overrides, all optional: `ANTHROPIC_MODEL` (default
 `claude-haiku-4-5`), `OPENAI_MODEL` (default `gpt-4o-mini`), `NIM_MODEL`
 (default `openai/gpt-oss-20b`) and `NIM_BASE_URL` (default
-`https://integrate.api.nvidia.com/v1`). `NIM_API_KEY` and `EXASEARCH_API_KEY`
+`https://integrate.api.nvidia.com/v1`). Research on NIM and the
+money assistant both use `ASSISTANT_MODEL` (default
+`nvidia/nemotron-3-ultra-550b-a55b`); `NIM_MODEL` covers categorising and the
+cash box. `NIM_API_KEY` and `EXASEARCH_API_KEY`
 are accepted as aliases of `NVIDIA_API_KEY` and `EXA_API_KEY`.
 
 Every variable is documented inline in [`.env.example`](.env.example).
@@ -740,6 +814,7 @@ data out, and each is one you switched on.
 | `fin sync` / **Sync now** | Your SimpleFIN access URL | A request for your data. Nothing of yours is uploaded. |
 | Categorising an unknown merchant | Your first configured AI provider | Merchant string, memo, signed amount, your note, a local row id — batched 40 at a time. No dates, accounts, balances or identity. |
 | The natural-language cash box | Your first configured AI provider | The sentence you typed. Falls back to a local regex parser if no provider is set. |
+| The money assistant (/assistant) | The one provider you selected | Pseudonymised: account names and masks become `⟦acct:id⟧`, people `⟦person:N⟧`, emails/phones/codes `⟦ref:N⟧`; row lists keep ids, dates, amounts and a normalised merchant, never memos or notes. Answers are rehydrated locally; the token map is never stored or sent. "What was sent" shows the exact payload. |
 | `fin research … --run` | The one provider you selected; plus Alpha Vantage (a ticker) and Exa (a fixed template query) if the model calls those tools | Your question. Your figures only if you also passed `--with-context`. |
 
 **With `--with-context`, the assistant additionally receives:** assets,
@@ -761,8 +836,17 @@ to ignore instructions embedded in them.
 Next.js itself collects anonymous framework telemetry, which carries no
 financial data. Turn it off with `bunx next telemetry --disable`.
 
-This is a single-owner app with no authentication. Keep it on `localhost` or
-behind your own authenticated private network.
+This is a single-owner app. Set `FIN_PASSWORD_HASH` and `FIN_SESSION_SECRET`
+to require a password on the web app (`fin auth status` checks the shell's
+env, `fin auth revoke` signs every session out); without them it serves only
+loopback requests. Keep it on `localhost` or behind your own private network
+either way.
+
+The assistant and the CLI share one tool table: chat reads and proposes writes
+only through `fin` commands, read from `fin help --json`. A write command is
+proposable when its `writes` text names its verbs —
+``local database — with `set` or `rm`; the bare report only reads`` — and anything the parser
+cannot read is refused in chat. Applied proposals are logged in `fin changes --all`.
 
 ---
 
