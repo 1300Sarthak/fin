@@ -1,29 +1,12 @@
 import { db } from "@/db";
 import { accounts, balanceSnapshots, categories, transactions } from "@/db/schema";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, notInArray, or, sql } from "drizzle-orm";
-import { endOfMonth, format, parse, startOfMonth, subMonths } from "date-fns";
-import { classifyInvestmentActivity, contributionAmountCents, type InvestmentActivityKind } from "@/lib/investment-activity";
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { addMonths, endOfDay, endOfMonth, format, parse, startOfDay, startOfMonth, subMonths } from "date-fns";
+import { incomeRowSql } from "@/lib/spending";
+import { classifyInvestmentActivity, contributionAmountCents, countedContributions, type InvestmentActivityKind } from "@/lib/investment-activity";
 
-const INVESTMENT_TYPES = ["brokerage", "ira", "crypto"] as const;
-
-const nonInvestmentAccount = notInArray(
-  transactions.accountId,
-  db.select({ id: accounts.id }).from(accounts).where(inArray(accounts.type, [...INVESTMENT_TYPES])),
-);
-
-const incomeActivity = and(
-  eq(transactions.isTransfer, false),
-  eq(transactions.isExcluded, false),
-  eq(transactions.isRefund, false),
-  nonInvestmentAccount,
-  or(
-    isNull(transactions.categoryId),
-    notInArray(
-      transactions.categoryId,
-      db.select({ id: categories.id }).from(categories).where(inArray(categories.kind, ["transfer", "investment"])),
-    ),
-  ),
-);
+// HSAs hold invested money and their only positive rows are sweep legs and dividends, never pay.
+const INVESTMENT_TYPES = ["brokerage", "ira", "crypto", "hsa"] as const;
 
 export type WorkspaceTransaction = {
   id: number;
@@ -58,58 +41,119 @@ export type EarningsWorkspace = {
   contributions: WorkspaceTransaction[];
 };
 
+export type EarningsRange = {
+  /** Inclusive YYYY-MM-DD. */
+  from: string; to: string;
+  /** Cash income inside the range. */
+  rangeCents: number;
+  /** Retirement-account deposits inside the range, deliberately separate from cash income. */
+  retirementCents: number;
+  earnedAndInvestedCents: number;
+  /** Cash income per calendar month over the trend window. */
+  averageMonthlyCents: number;
+  /** Every cash income on record, any date. */
+  totalCents: number;
+  sources: PieSlice[];
+  accounts: PieSlice[];
+  /** Monthly: `valueCents` cash income, `secondaryCents` retirement deposits. */
+  trend: TrendPoint[];
+  transactions: WorkspaceTransaction[];
+  transactionCount: number;
+  contributions: WorkspaceTransaction[];
+  /** All retirement deposits on record, any date. */
+  retirementContributionCents: number;
+  retirementContributionCount: number;
+};
+
+const TXN_LIMIT = 250;
+
 /** Income is money that arrived, excluding refunds, internal moves, investments,
- * and never-count transactions. This mirrors the Made cash-flow treatment. */
-export async function getEarningsWorkspace(requestedMonth?: string): Promise<EarningsWorkspace> {
-  const validMonth = requestedMonth && /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedMonth);
-  const monthStart = startOfMonth(validMonth ? parse(`${requestedMonth}-01`, "yyyy-MM-dd", new Date()) : new Date());
-  const monthEnd = endOfMonth(monthStart);
-  const since = startOfMonth(subMonths(monthStart, 5));
+ * and never-count transactions. This mirrors the Made cash-flow treatment.
+ * `trendStart` is the first month of the monthly trend (it may start before `start`). */
+async function earningsBetween(start: Date, end: Date, trendStart: Date): Promise<EarningsRange> {
+  const inRange = and(gte(transactions.postedAt, start), lte(transactions.postedAt, end));
+  // Made's own row predicate, so Cash income and its drill-down agree with Spending.
+  const income = incomeRowSql();
   const [totals, sourceRows, accountRows, trendRows, rows, retirementRows] = await Promise.all([
     db.select({
       total: sql<number>`COALESCE(SUM(${transactions.amountCents}), 0)`,
-      month: sql<number>`COALESCE(SUM(CASE WHEN ${gte(transactions.postedAt, monthStart)} AND ${lte(transactions.postedAt, monthEnd)} THEN ${transactions.amountCents} ELSE 0 END), 0)`,
-    }).from(transactions).where(and(incomeActivity, sql`${transactions.amountCents} > 0`)).get(),
+      range: sql<number>`COALESCE(SUM(CASE WHEN ${inRange} THEN ${transactions.amountCents} ELSE 0 END), 0)`,
+      count: sql<number>`COALESCE(SUM(CASE WHEN ${inRange} THEN 1 ELSE 0 END), 0)`,
+    }).from(transactions).where(income).get(),
     db.select({
       id: sql<string>`COALESCE(CAST(${transactions.categoryId} AS TEXT), ${transactions.merchantRaw})`,
       name: sql<string>`COALESCE(${categories.name}, ${transactions.merchantRaw}, 'Uncategorized income')`,
       value: sql<number>`COALESCE(SUM(${transactions.amountCents}), 0)`,
       count: sql<number>`COUNT(*)`,
     }).from(transactions).leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .where(and(incomeActivity, sql`${transactions.amountCents} > 0`, gte(transactions.postedAt, monthStart), lte(transactions.postedAt, monthEnd))).groupBy(sql`COALESCE(CAST(${transactions.categoryId} AS TEXT), ${transactions.merchantRaw})`),
+      .where(and(income, inRange)).groupBy(sql`COALESCE(CAST(${transactions.categoryId} AS TEXT), ${transactions.merchantRaw})`),
     db.select({ id: accounts.id, name: accounts.name, value: sql<number>`COALESCE(SUM(${transactions.amountCents}), 0)`, count: sql<number>`COUNT(*)` })
       .from(transactions).innerJoin(accounts, eq(transactions.accountId, accounts.id))
-      .where(and(incomeActivity, sql`${transactions.amountCents} > 0`, gte(transactions.postedAt, monthStart), lte(transactions.postedAt, monthEnd))).groupBy(accounts.id),
+      .where(and(income, inRange)).groupBy(accounts.id),
     db.select({ month: sql<string>`strftime('%Y-%m', ${transactions.postedAt}, 'unixepoch')`, value: sql<number>`COALESCE(SUM(${transactions.amountCents}), 0)` })
-      .from(transactions).where(and(incomeActivity, sql`${transactions.amountCents} > 0`, gte(transactions.postedAt, since))).groupBy(sql`strftime('%Y-%m', ${transactions.postedAt}, 'unixepoch')`),
+      .from(transactions).where(and(income, gte(transactions.postedAt, trendStart), lte(transactions.postedAt, end))).groupBy(sql`strftime('%Y-%m', ${transactions.postedAt}, 'unixepoch')`),
     db.select({ id: transactions.id, accountId: transactions.accountId, accountName: accounts.name, amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, postedAt: transactions.postedAt, categoryName: sql<string>`COALESCE(${categories.name}, 'Uncategorized')`, categoryId: transactions.categoryId })
       .from(transactions).innerJoin(accounts, eq(transactions.accountId, accounts.id)).leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .where(and(incomeActivity, sql`${transactions.amountCents} > 0`, gte(transactions.postedAt, monthStart), lte(transactions.postedAt, monthEnd))).orderBy(desc(transactions.postedAt)).limit(250),
+      .where(and(income, inRange)).orderBy(desc(transactions.postedAt)).limit(TXN_LIMIT),
     db.select({ id: transactions.id, accountId: transactions.accountId, amountCents: transactions.amountCents, merchantRaw: transactions.merchantRaw, postedAt: transactions.postedAt, categoryName: categories.name, categoryKind: categories.kind, categoryId: transactions.categoryId, accountType: accounts.type, accountName: accounts.name })
       .from(transactions).innerJoin(accounts, eq(transactions.accountId, accounts.id)).leftJoin(categories, eq(transactions.categoryId, categories.id))
       .where(and(inArray(accounts.type, [...INVESTMENT_TYPES]), eq(transactions.isExcluded, false))),
   ]);
-  const trendMap = new Map(trendRows.map((row) => [row.month, row.value]));
-  const trend = Array.from({ length: 6 }, (_, index) => {
-    const month = format(subMonths(monthStart, 5 - index), "yyyy-MM");
-    return { month, valueCents: trendMap.get(month) ?? 0 };
-  });
-  const totalCents = totals?.total ?? 0;
-  const allRetirementContributions = retirementRows.filter((row) =>
-    classifyInvestmentActivity(row).kind === "contribution" &&
-    (row.accountType === "ira" || /\b401\s?\(?k\)?|403\s?\(?b\)?|retirement\b/i.test(row.accountName)),
+  const allRetirementContributions = countedContributions(retirementRows).filter((row) =>
+    row.accountType === "ira" || /\b401\s?\(?k\)?|403\s?\(?b\)?|retirement\b/i.test(row.accountName),
   );
-  const retirementContributions = allRetirementContributions.filter((row) => row.postedAt >= monthStart && row.postedAt <= monthEnd);
-  const monthRetirementContributionCents = retirementContributions.reduce((sum, row) => sum + contributionAmountCents(row.amountCents), 0);
+  const retirementByMonth = new Map<string, number>();
+  for (const row of allRetirementContributions) {
+    const m = format(row.postedAt, "yyyy-MM");
+    retirementByMonth.set(m, (retirementByMonth.get(m) ?? 0) + contributionAmountCents(row.amountCents));
+  }
+  const trendMap = new Map(trendRows.map((row) => [row.month, row.value]));
+  const trend: TrendPoint[] = [];
+  for (let m = startOfMonth(trendStart); m <= end; m = addMonths(m, 1)) {
+    const month = format(m, "yyyy-MM");
+    trend.push({ month, valueCents: trendMap.get(month) ?? 0, secondaryCents: retirementByMonth.get(month) ?? 0 });
+  }
+  const retirementContributions = allRetirementContributions.filter((row) => row.postedAt >= start && row.postedAt <= end).sort((a, b) => b.postedAt.getTime() - a.postedAt.getTime());
+  const retirementCents = retirementContributions.reduce((sum, row) => sum + contributionAmountCents(row.amountCents), 0);
+  const rangeCents = totals?.range ?? 0;
   return {
-    monthKey: format(monthStart, "yyyy-MM"), monthLabel: format(monthStart, "MMMM yyyy"),
-    totalCents, monthCents: totals?.month ?? 0, monthRetirementContributionCents, monthEarnedAndInvestedCents: (totals?.month ?? 0) + monthRetirementContributionCents, averageMonthlyCents: Math.round(trend.reduce((sum, point) => sum + point.valueCents, 0) / 6),
+    from: format(start, "yyyy-MM-dd"), to: format(end, "yyyy-MM-dd"),
+    rangeCents, retirementCents, earnedAndInvestedCents: rangeCents + retirementCents,
+    averageMonthlyCents: trend.length ? Math.round(trend.reduce((sum, point) => sum + point.valueCents, 0) / trend.length) : 0,
+    totalCents: totals?.total ?? 0,
     sources: sourceRows.filter((x) => x.value > 0).map((x) => ({ id: x.id, name: x.name || "Uncategorized income", valueCents: x.value, count: x.count })).sort((a, b) => b.valueCents - a.valueCents),
     accounts: accountRows.filter((x) => x.value > 0).map((x) => ({ id: String(x.id), name: x.name, valueCents: x.value, count: x.count })).sort((a, b) => b.valueCents - a.valueCents),
-    trend, transactions: rows,
+    trend, transactions: rows, transactionCount: totals?.count ?? rows.length,
+    contributions: retirementContributions.map((row) => ({ id: row.id, accountId: row.accountId, accountName: row.accountName, amountCents: contributionAmountCents(row.amountCents), merchantRaw: row.merchantRaw, postedAt: row.postedAt, categoryName: row.categoryName ?? "Retirement contribution", categoryId: row.categoryId })),
     retirementContributionCents: allRetirementContributions.reduce((sum, row) => sum + contributionAmountCents(row.amountCents), 0),
     retirementContributionCount: allRetirementContributions.length,
-    contributions: retirementContributions.map((row) => ({ id: row.id, accountId: row.accountId, accountName: row.accountName, amountCents: contributionAmountCents(row.amountCents), merchantRaw: row.merchantRaw, postedAt: row.postedAt, categoryName: row.categoryName ?? "Retirement contribution", categoryId: row.categoryId })),
+  };
+}
+
+/** Earnings for inclusive YYYY-MM-DD bounds; `from` null = since the first transaction. The trend covers at least six months. */
+export async function getEarningsRange(from: string | null, to: string | null): Promise<EarningsRange> {
+  const end = endOfDay(to ? parse(to, "yyyy-MM-dd", new Date()) : new Date());
+  let start: Date;
+  if (from) start = startOfDay(parse(from, "yyyy-MM-dd", new Date()));
+  else {
+    const first = await db.select({ d: sql<number | null>`MIN(${transactions.postedAt})` }).from(transactions).get();
+    start = startOfDay(first?.d ? new Date(first.d * 1000) : end);
+  }
+  const sixBack = startOfMonth(subMonths(end, 5));
+  return earningsBetween(start, end, start < sixBack ? startOfMonth(start) : sixBack);
+}
+
+/** One calendar month, the shape `fin earnings` prints. */
+export async function getEarningsWorkspace(requestedMonth?: string): Promise<EarningsWorkspace> {
+  const validMonth = requestedMonth && /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedMonth);
+  const monthStart = startOfMonth(validMonth ? parse(`${requestedMonth}-01`, "yyyy-MM-dd", new Date()) : new Date());
+  const r = await earningsBetween(monthStart, endOfMonth(monthStart), startOfMonth(subMonths(monthStart, 5)));
+  return {
+    monthKey: format(monthStart, "yyyy-MM"), monthLabel: format(monthStart, "MMMM yyyy"),
+    totalCents: r.totalCents, monthCents: r.rangeCents, monthRetirementContributionCents: r.retirementCents, monthEarnedAndInvestedCents: r.earnedAndInvestedCents,
+    averageMonthlyCents: r.averageMonthlyCents, sources: r.sources, accounts: r.accounts,
+    trend: r.trend.map(({ month, valueCents }) => ({ month, valueCents })), transactions: r.transactions,
+    retirementContributionCents: r.retirementContributionCents, retirementContributionCount: r.retirementContributionCount, contributions: r.contributions,
   };
 }
 
@@ -118,7 +162,8 @@ export type InvestmentAccount = { id: number; name: string; type: string; balanc
 export type InvestmentsWorkspace = { totalCents: number; accounts: InvestmentAccount[]; byType: PieSlice[]; trend: TrendPoint[]; activity: InvestmentActivity[]; contributionCents: number; contributionCount: number; investmentIncomeCents: number; withdrawalCents: number; feeCents: number };
 
 /** Investment balances are authoritative account/snapshot values. Investment
- * transactions are activity only; contributions and withdrawals never become spending. */
+ * transactions are activity only; contributions and withdrawals never become spending.
+ * Money in and out for a range is getInvestmentFlows, not this: `activity` is only the latest rows. */
 export async function getInvestmentsWorkspace(): Promise<InvestmentsWorkspace> {
   const investmentAccounts = await db.query.accounts.findMany({
     where: and(eq(accounts.isActive, true), inArray(accounts.type, [...INVESTMENT_TYPES])),
@@ -140,6 +185,10 @@ export async function getInvestmentsWorkspace(): Promise<InvestmentsWorkspace> {
     const classification = classifyInvestmentActivity(row);
     return { ...row, activityKind: classification.kind, activityLabel: classification.label, displayAmountCents: Math.abs(row.amountCents), sourceAccountName: row.transferPairTxnId == null ? null : pairAccountById.get(row.transferPairTxnId) ?? null, isInternalTransfer: row.isTransfer };
   });
+  // The redundant leg of a double-reported contribution stays visible in the list, marked as such.
+  const counted = countedContributions(activityRows);
+  const countedIds = new Set(counted.map((row) => row.id));
+  for (const row of activity) if (row.activityKind === "contribution" && !countedIds.has(row.id)) row.activityLabel = "Contribution (duplicate leg)";
   const byType = new Map<string, number>();
   for (const account of investmentAccounts) byType.set(account.type, (byType.get(account.type) ?? 0) + account.currentBalanceCents);
   const snapshotByDate = new Map<string, { sum: number; accountIds: Set<number> }>();
