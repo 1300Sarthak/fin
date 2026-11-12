@@ -367,3 +367,201 @@ export function rangeDay(raw: string, edge: "start" | "end"): string {
   throw new Error(`expected YYYY-MM or YYYY-MM-DD, got "${raw}"`);
 }
 
+const shiftMonths = (m: string, by: number) => {
+  const [y, mm] = m.split("-").map(Number);
+  return new Date(Date.UTC(y, mm - 1 + by, 1)).toISOString().slice(0, 7);
+};
+
+/** First day of the period holding `day`. Weeks start Monday. */
+export function periodStart(day: string, by: GroupBy): string {
+  if (by === "month") return `${day.slice(0, 7)}-01`;
+  if (by === "year") return `${day.slice(0, 4)}-01-01`;
+  if (by === "quarter") return `${day.slice(0, 4)}-${String(Math.floor((Number(day.slice(5, 7)) - 1) / 3) * 3 + 1).padStart(2, "0")}-01`;
+  return addDays(day, -((new Date(utc(day)).getUTCDay() + 6) % 7));
+}
+const nextPeriod = (start: string, by: GroupBy) =>
+  by === "week" ? addDays(start, 7) : `${shiftMonths(start.slice(0, 7), by === "month" ? 1 : by === "quarter" ? 3 : 12)}-01`;
+function periodKey(start: string, by: GroupBy): { key: string; label: string } {
+  if (by === "month") return { key: start.slice(0, 7), label: start.slice(0, 7) };
+  if (by === "year") return { key: start.slice(0, 4), label: start.slice(0, 4) };
+  if (by === "quarter") { const k = `${start.slice(0, 4)}-Q${(Number(start.slice(5, 7)) + 2) / 3}`; return { key: k, label: k }; }
+  return { key: start, label: `week of ${start}` };
+}
+
+/** The equal-length stretch just before [from, to]: whole calendar months when the range is whole months, else days. */
+export function previousRange(from: string, to: string): { from: string; to: string } {
+  if (from.endsWith("-01") && to === monthEnd(to.slice(0, 7))) {
+    const n = (Number(to.slice(0, 4)) - Number(from.slice(0, 4))) * 12 + Number(to.slice(5, 7)) - Number(from.slice(5, 7)) + 1;
+    return { from: `${shiftMonths(from.slice(0, 7), -n)}-01`, to: monthEnd(shiftMonths(to.slice(0, 7), -n)) };
+  }
+  const len = daysBetween(from, to) + 1;
+  return { from: addDays(from, -len), to: addDays(from, -1) };
+}
+
+/**
+ * Pure: every dated income amount on one basis. Paid basis dates an entry by
+ * paidOn and skips unpaid work; work basis dates it by workDate, else the first
+ * of its work month, else paidOn, and keeps unpaid work. W-2 pay and other
+ * deposits have no work date, so both bases use the deposit date.
+ */
+export function incomeItems(sources: Source[], entries: Entry[], deposits: Deposit[], other: OtherDeposit[], basis: Basis): IncomeItem[] {
+  const linked = new Set(entries.flatMap((e) => (e.txnId ? [e.txnId] : [])));
+  const items: IncomeItem[] = [];
+  for (const s of sources) {
+    for (const e of entries.filter((x) => x.sourceId === s.id)) {
+      const date = basis === "paid" ? e.paidOn : e.workDate ?? (e.workMonth ? `${e.workMonth}-01` : e.paidOn);
+      if (date) items.push({ date, source: s.name, bucket: entryBucket(s, e), cents: e.amountCents, hours: e.hours, paid: !!e.paidOn });
+    }
+    if (s.taxTreatment !== "w2" || !s.matchPattern) continue;
+    for (const d of deposits) {
+      if (!linked.has(d.id) && matchesPattern(s.matchPattern, d.description)) items.push({ date: d.date, source: s.name, bucket: "w2", cents: d.amountCents, hours: null, paid: true });
+    }
+  }
+  for (const d of other) items.push({ date: d.date, source: OTHER, bucket: "other", cents: d.amountCents, hours: null, paid: true, category: d.category });
+  return items;
+}
+
+function totalsOf(items: IncomeItem[]): RangeTotals {
+  const t: RangeTotals = { w2: 0, se: 0, nontaxable: 0, other: 0, total: 0, hours: 0, avgRateCents: null };
+  let hourly = 0;
+  for (const i of items) {
+    t[i.bucket] += i.cents;
+    t.total += i.cents;
+    if (i.hours) { t.hours += i.hours; hourly += i.cents; }
+  }
+  t.avgRateCents = t.hours ? Math.round(hourly / t.hours) : null;
+  return t;
+}
+
+function groupByCategory(rows: OtherDeposit[]) {
+  const by = new Map<string, { category: string; totalCents: number; count: number }>();
+  for (const d of rows) {
+    const row = by.get(d.category) ?? { category: d.category, totalCents: 0, count: 0 };
+    row.totalCents += d.amountCents;
+    row.count++;
+    by.set(d.category, row);
+  }
+  return [...by.values()].sort((a, b) => b.totalCents - a.totalCents);
+}
+
+/** Tax refunds and reimbursements are money in, not earnings. Pure, by category or description. */
+export const isRefundLike = (d: Pick<OtherDeposit, "category" | "description">) =>
+  /^(taxes|refunds?|reimbursements?)$/i.test(d.category) || /\btax refund\b|\breimburse/i.test(d.description);
+
+/** Pure: the range report from items already narrowed to the wanted sources. `unmatched` is every source's unclaimed pattern deposits. */
+export function aggregateIncome(
+  items: IncomeItem[],
+  sources: Source[],
+  opts: { from?: string; to: string; groupBy: GroupBy; basis: Basis; includeOther: boolean; unmatched: Map<number, Deposit[]>; other: OtherDeposit[]; refunds?: OtherDeposit[] },
+): IncomeRange {
+  const earliest = items.reduce<string | null>((m, i) => (m == null || i.date < m ? i.date : m), null);
+  const from = opts.from ?? (earliest && earliest < opts.to ? earliest : opts.to);
+  const to = opts.to;
+  if (from > to) throw new Error(`--from ${from} is after --to ${to}`);
+  const inRange = items.filter((i) => i.date >= from && i.date <= to);
+
+  const periods: Period[] = [];
+  for (let s = periodStart(from, opts.groupBy); s <= to; s = nextPeriod(s, opts.groupBy)) {
+    const end = addDays(nextPeriod(s, opts.groupBy), -1);
+    periods.push({ ...periodKey(s, opts.groupBy), start: s < from ? from : s, end: end > to ? to : end, w2: 0, se: 0, nontaxable: 0, other: 0, total: 0, bySource: {} });
+  }
+  const names = [...sources.map((s) => s.name), ...(opts.includeOther ? [OTHER] : [])];
+  for (const p of periods) for (const n of names) p.bySource[n] = 0;
+  for (const i of inRange) {
+    const p = periods.find((x) => i.date >= x.start && i.date <= x.end)!;
+    p[i.bucket] += i.cents;
+    p.total += i.cents;
+    p.bySource[i.source] += i.cents;
+  }
+
+  const rangeSources: RangeSource[] = sources.map((s) => {
+    const mine = inRange.filter((i) => i.source === s.name);
+    const t = totalsOf(mine);
+    return {
+      id: s.id, name: s.name, taxTreatment: s.taxTreatment,
+      totalCents: t.total, taxableCents: t.w2 + t.se, nontaxableCents: t.nontaxable,
+      unpaidCents: mine.filter((i) => !i.paid).reduce((sum, i) => sum + i.cents, 0),
+      hours: t.hours, effectiveRateCents: t.avgRateCents,
+      series: periods.map((p) => p.bySource[s.name]),
+      unmatched: (opts.unmatched.get(s.id) ?? []).filter((d) => d.date >= from && d.date <= to),
+    };
+  });
+  const otherIn = opts.includeOther ? opts.other.filter((d) => d.date >= from && d.date <= to) : [];
+  const byCategory = groupByCategory(otherIn);
+  const refundsIn = (opts.refunds ?? []).filter((d) => d.date >= from && d.date <= to);
+
+  const totals = totalsOf(inRange);
+  const prev = previousRange(from, to);
+  const prevTotals = totalsOf(items.filter((i) => i.date >= prev.from && i.date <= prev.to));
+  const notes: string[] = [];
+  if (opts.basis === "work") notes.push("Work basis: logged work counts in its work month (dated the 1st when no work date is logged), unpaid work included. W-2 pay and other deposits have no work date and count when deposited.");
+  else notes.push("Paid basis: income counts when the money landed; unpaid work is left out.");
+  if (opts.includeOther) notes.push(`"${OTHER}" is money in that the Earnings page counts but no income source claims (interest, bonuses, gifts). Its tax treatment is unknown, so it is outside the W-2 / self-employment / nontaxable totals. Tax refunds and reimbursements are money in but not earnings: they are left out of every total and listed separately.`);
+  if (earliest && prev.to < earliest) notes.push(`The previous period (${prev.from} to ${prev.to}) is before the earliest income on record (${earliest}).`);
+  return {
+    from, to, groupBy: opts.groupBy, basis: opts.basis, earliest, periods, sources: rangeSources,
+    other: { totalCents: otherIn.reduce((s, d) => s + d.amountCents, 0), byCategory, deposits: otherIn },
+    refunds: { totalCents: refundsIn.reduce((s, d) => s + d.amountCents, 0), byCategory: groupByCategory(refundsIn), deposits: refundsIn },
+    totals,
+    previous: { ...prev, totals: prevTotals, deltaCents: totals.total - prevTotals.total, deltaPct: prevTotals.total ? ((totals.total - prevTotals.total) / prevTotals.total) * 100 : null },
+    notes,
+  };
+}
+
+const NOT_INCOME_ACCOUNTS = ["brokerage", "ira", "crypto", "hsa"] as const;
+
+/**
+ * Money in the Earnings page counts (src/lib/workspaces.ts `incomeActivity`):
+ * positive, not a transfer, refund or exclusion, outside investment accounts,
+ * and not coded as a transfer or investment. HSA accounts are also left out
+ * here: their only "income" rows are the money-market sweep legs.
+ */
+async function loadEarningsDeposits(): Promise<OtherDeposit[]> {
+  const rows = await db
+    .select({ id: transactions.id, postedAt: transactions.postedAt, amountCents: transactions.amountCents, account: accounts.name, accountId: transactions.accountId, description: transactions.merchantRaw, category: categories.name, kind: categories.kind })
+    .from(transactions).innerJoin(accounts, eq(accounts.id, transactions.accountId)).leftJoin(categories, eq(categories.id, transactions.categoryId))
+    .where(and(gt(transactions.amountCents, 0), eq(transactions.isExcluded, false), eq(transactions.isPending, false), eq(transactions.isRefund, false), eq(transactions.isTransfer, false), notInArray(accounts.type, [...NOT_INCOME_ACCOUNTS])));
+  return rows
+    .filter((r) => r.kind !== "transfer" && r.kind !== "investment")
+    .map((r) => ({ id: r.id, date: isoDate(r.postedAt), amountCents: r.amountCents, account: r.account, accountId: r.accountId, description: r.description, category: r.category ?? "Uncategorized" }));
+}
+
+/**
+ * Income for any stretch of time, any grouping, either basis. `sources` names
+ * jobs (case-insensitive) and may include "Other"; omitted means every job
+ * plus Other. `from` omitted means the earliest income on record; `to` omitted
+ * means today.
+ */
+export async function getIncomeRange(opts: { from?: string; to?: string; sources?: string[]; groupBy?: GroupBy; basis?: Basis; today?: string } = {}): Promise<IncomeRange> {
+  const [all, entries, deposits, earnings] = await Promise.all([
+    db.select().from(incomeSources).where(eq(incomeSources.archived, false)).orderBy(incomeSources.id),
+    db.select().from(incomeEntries),
+    loadDeposits(),
+    loadEarningsDeposits(),
+  ]);
+  const known = [...all.map((s) => s.name), OTHER];
+  for (const w of opts.sources ?? []) if (!known.some((k) => k.toLowerCase() === w.trim().toLowerCase())) throw new Error(`no income source "${w}" — known: ${known.join(", ")}`);
+  const wanted = opts.sources?.map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const sources = wanted?.length ? all.filter((s) => wanted.includes(s.name.toLowerCase())) : all;
+  const includeOther = !wanted?.length || wanted.includes(OTHER.toLowerCase());
+
+  // Anything a job claims is not "other": linked deposits and every pattern match (W-2 pay, or a self-employment deposit awaiting a link).
+  const linked = new Set(entries.flatMap((e) => (e.txnId ? [e.txnId] : [])));
+  const unmatched = new Map<number, Deposit[]>();
+  const claimed = new Set(linked);
+  for (const s of all) {
+    const mine = deposits.filter((d) => matchesPattern(s.matchPattern, d.description));
+    for (const d of mine) claimed.add(d.id);
+    if (s.taxTreatment !== "w2") unmatched.set(s.id, mine.filter((d) => !linked.has(d.id)));
+  }
+  const unclaimed = earnings.filter((d) => !claimed.has(d.id));
+  const other = unclaimed.filter((d) => !isRefundLike(d));
+  const refunds = unclaimed.filter(isRefundLike);
+  const basis = opts.basis ?? "paid";
+  const items = incomeItems(sources, entries, deposits, includeOther ? other : [], basis);
+  return aggregateIncome(items, sources, {
+    from: opts.from ? rangeDay(opts.from, "start") : undefined,
+    to: opts.to ? rangeDay(opts.to, "end") : opts.today ?? isoDate(new Date()),
+    groupBy: opts.groupBy ?? "month", basis, includeOther, unmatched, other, refunds,
+  });
+}
