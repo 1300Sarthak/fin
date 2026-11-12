@@ -1,7 +1,9 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useTransition } from "react";
 import { Button } from "@/components/ui/button";
+import { useNetWorthRange } from "@/components/net-worth-range";
 
 export type RangeOption = { value: string; label: string };
 
@@ -24,13 +26,18 @@ export function RangeSelector({
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
+  // Inside a NetWorthRangeProvider the pick shows at once; the URL follows.
+  const shared = useNetWorthRange();
+  const [, startTransition] = useTransition();
+  const selected = shared?.value ?? value;
 
   function set(v: string) {
+    shared?.set(v);
     const params = new URLSearchParams(sp.toString());
     if (defaultValue !== undefined && v === defaultValue) params.delete(paramKey);
     else params.set(paramKey, v);
     const qs = params.toString();
-    router.push(qs ? `${pathname}?${qs}` : pathname);
+    startTransition(() => router.push(qs ? `${pathname}?${qs}` : pathname, { scroll: false }));
   }
 
   return (
@@ -40,7 +47,8 @@ export function RangeSelector({
           key={o.value}
           type="button"
           size="xs"
-          variant={o.value === value ? "secondary" : "ghost"}
+          variant={o.value === selected ? "secondary" : "ghost"}
+          aria-pressed={o.value === selected}
           onClick={() => set(o.value)}
         >
           {o.label}
