@@ -1,6 +1,6 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { bool, str, type Args } from "../args";
+import { bool, month, str, type Args } from "../args";
 import { emit, kv, money, table } from "../render";
 import { getFinancialPlanningContext, getPlanningProfile, savePlanningProfile } from "@/lib/financial-planning";
 import { planningProfileSchema, taxProfileSchema } from "@/lib/financial-planning-core";
@@ -8,6 +8,7 @@ import { calculateTaxPlan } from "@/lib/tax-planning";
 import { deleteSpreadsheet, listSpreadsheets, saveSpreadsheet, spreadsheetSummary, updateSpreadsheet } from "@/lib/spreadsheets";
 import { SPREADSHEET_LIMITS } from "@/lib/spreadsheet-core";
 import { exportFinanceXlsx } from "@/lib/export-data";
+import { buildMonthWorkbook } from "@/lib/assistant/export";
 import { z } from "zod";
 
 /**
@@ -161,9 +162,9 @@ export async function spreadsheets(a: Args, json: boolean) {
 
 export async function exportData(a: Args, json: boolean) {
   const path = str(a, "out") ?? a._[0];
-  if (!path || !path.toLowerCase().endsWith(".xlsx")) throw new Error("Usage: fin export --out PATH.xlsx [--force] [--json]");
+  if (!path || !path.toLowerCase().endsWith(".xlsx")) throw new Error("Usage: fin export --out PATH.xlsx [--month YYYY-MM] [--force] [--json]");
   const target = resolve(path);
-  const buffer = await exportFinanceXlsx();
+  const buffer = str(a, "month") ? await buildMonthWorkbook(month(str(a, "month"))) : await exportFinanceXlsx();
   try {
     await writeFile(target, buffer, { flag: bool(a, "force") ? "w" : "wx", mode: 0o600 });
   } catch (error) {

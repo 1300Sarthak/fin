@@ -4,12 +4,14 @@
  * guessed badly, a pending hold that already settled, money that was never
  * yours. These are the primitives for fixing those in place.
  */
-import { bool, num, RANGE, rowId, type Args } from "../args";
+import { bool, month, num, RANGE, rowId, str, type Args } from "../args";
 import { clip, emit, heading, kv, money, table } from "../render";
 import { setManualCategory } from "@/lib/categorize";
 import { getCategoriesForSelect } from "@/lib/queries";
 import { setExcluded, findPendingDuplicates, listPending } from "@/lib/ledger";
 import { setRefund } from "@/lib/refunds";
+import { applyChange, listActivity, listChanges, proposeSplit, undoChange } from "@/lib/assistant/changes";
+import { monthRange } from "@/lib/spending";
 import { db } from "@/db";
 import { transactions } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -129,4 +131,45 @@ export async function pending(a: Args, json: boolean) {
       ),
     ].join("\n"),
   );
+}
+
+/**
+ * Count only your share of a purchase others paid back. The same proposal,
+ * backup and audit trail as the assistant, applied immediately because running
+ * this command is the approval.
+ */
+export async function split(a: Args, json: boolean) {
+  const usage = "usage: fin split <txn-id> <my-share-usd> [--undo]   (e.g. fin split 412 21.00)";
+  if (!a._[0]) throw new Error(usage);
+  const id = rowId(a._[0], "a transaction id");
+  if (bool(a, "undo")) {
+    const last = (await listChanges(undefined, ["applied"])).find((c) => c.kind === "split" && c.txn.id === id);
+    if (!last) throw new Error(`no applied split on #${id} to undo`);
+    const change = await undoChange(last.id);
+    return emit(json, change, () => `  #${id} restored: undid change #${change.id}`);
+  }
+  const raw = a._[1]?.replace(/^\$/, "");
+  if (!raw || !/^\d+(\.\d{1,2})?$/.test(raw)) throw new Error(usage);
+  const proposal = await proposeSplit(id, Math.round(Number(raw) * 100), "cli");
+  const change = await applyChange(proposal.id);
+  emit(json, change, () => `  change #${change.id}\n  ${change.summary}`);
+}
+
+/** The audit log of assistant and CLI edits, newest first. */
+export async function changes(a: Args, json: boolean) {
+  if (bool(a, "all")) {
+    const limit = Number(str(a, "limit") ?? 200);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("--limit must be a whole number from 1 to 1000.");
+    const rows = await listActivity(limit);
+    return emit(json, rows, () => table(
+      [{ head: "ID", align: "r" }, { head: "STATUS" }, { head: "WHEN" }, { head: "UNDO" }, { head: "COMMAND" }],
+      rows.map((c) => [c.id, c.status, c.at.slice(0, 16).replace("T", " "), c.undoable ? "yes" : "no", clip(c.command, 80)]),
+    ));
+  }
+  const m = month(str(a, "month") ?? a._[0] ?? monthRange().key);
+  const rows = await listChanges(m);
+  emit(json, rows, () => table(
+    [{ head: "ID", align: "r" }, { head: "STATUS" }, { head: "KIND" }, { head: "DATE" }, { head: "AMOUNT", align: "r" }, { head: "SUMMARY" }],
+    rows.map((c) => [c.id, c.status, c.kind, c.txn.date, money(c.txn.amountCents), clip(c.summary, 70)]),
+  ));
 }

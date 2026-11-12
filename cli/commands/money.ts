@@ -2,11 +2,13 @@
  * Commands that answer "what happened to the money": balances, cash flow,
  * spending, and the burn-rate report.
  */
-import { bool, month, num, pick, RANGE, str, shiftMonth, type Args } from "../args";
+import { bool, checkNumber, isoDay, month, num, pick, RANGE, str, shiftMonth, type Args } from "../args";
+import { getFilteredTransactions, getCategoryName, txnHref, TXN_KINDS, type TxnFilter } from "@/lib/txn-filter";
+import { isoDate } from "@/lib/format";
 import { clip, emit, heading, kv, money, pct, signed, table } from "../render";
 import { getBurnReport, allocate, type FlowKind } from "@/lib/burn";
 import { getNetWorthSummary } from "@/lib/networth";
-import { getAccountsWithInstitution, getTransactions } from "@/lib/queries";
+import { getAccountsWithInstitution } from "@/lib/queries";
 import {
   monthRange,
   getCashflow,
@@ -18,6 +20,8 @@ import {
 } from "@/lib/spending";
 import { getEarningsWorkspace, getInvestmentsWorkspace, getTransfersWorkspace } from "@/lib/workspaces";
 import { getRefunds } from "@/lib/refunds";
+import { getInvestmentFlows } from "@/lib/investment-history";
+import { RANGE_PRESETS, resolveRange } from "@/components/kit/range";
 import { getPeriodHistory } from "@/lib/history";
 import { applyCashOp, dateFromInput, getCashAccount, getCashActivity, parseCashCommand } from "@/lib/cash";
 import { looksLikeSet, parseCashText } from "@/lib/cash-core";
@@ -187,31 +191,50 @@ export async function spending(a: Args, json: boolean) {
   );
 }
 
+/**
+ * The same filter the Transactions page reads from its URL, so
+ * `fin txns --from 2026-10-01 --to 2026-10-31 --category Groceries` and
+ * `/transactions?from=2026-10-01&to=2026-10-31&category=Groceries` agree.
+ */
 export async function txns(a: Args, json: boolean) {
   const m = str(a, "month");
   const r = m ? monthRange(month(m)) : undefined;
-  const rows = await getTransactions({
-    q: str(a, "search") ?? a._[0],
-    accountId: num(a, "account", RANGE.id),
-    categoryId: str(a, "category") === "none" ? "none" : num(a, "category", RANGE.id),
-    since: r?.start,
-    until: r?.end,
-    amountType: pick(a, "type", ["income", "expense"] as const),
-    limit: num(a, "limit", RANGE.limit) ?? 25,
-  });
-  emit(json, rows, () =>
-    table(
-      [{ head: "ID", align: "r" }, { head: "DATE" }, { head: "MERCHANT" }, { head: "AMOUNT", align: "r" }, { head: "CATEGORY" }, { head: "ACCOUNT" }, { head: "FLAGS" }],
-      rows.map((t) => [
-        t.id,
-        day(t.postedAt),
-        clip(t.merchantRaw, 32),
-        money(t.amountCents),
-        clip(t.category?.name ?? "—", 18),
-        clip(t.account?.name ?? "", 20),
-        [t.isTransfer && "transfer", t.isRefund && "refund", t.isExcluded && "excluded", t.isPending && "pending"].filter(Boolean).join(","),
+  const from = str(a, "from") ? isoDay(str(a, "from")!, "--from") : r ? isoDate(r.start) : undefined;
+  const to = str(a, "to") ? isoDay(str(a, "to")!, "--to") : r ? isoDate(r.end) : undefined;
+  const kind = pick(a, "kind", TXN_KINDS) ?? pick(a, "type", ["income", "expense"] as const);
+  const cat = str(a, "category");
+  const categoryId = cat && /^\d+$/.test(cat) ? checkNumber("category", cat, RANGE.id) : undefined;
+  const category = categoryId ? (await getCategoryName(categoryId)) : cat;
+  const filter: TxnFilter = {
+    from, to, kind, category,
+    q: str(a, "search") ?? (a._.length ? a._.join(" ") : undefined),
+    merchant: str(a, "merchant"),
+    account: num(a, "account", RANGE.id),
+    source: str(a, "source"),
+  };
+  const { rows, totals } = await getFilteredTransactions(filter, { limit: num(a, "limit", RANGE.limit) ?? 25 });
+  emit(json, { filter, totals, href: txnHref(filter), rows }, () =>
+    [
+      kv([
+        ["Matching", `${totals.count}${totals.countedRows !== totals.count ? ` (${totals.count - totals.countedRows} transfers/never-count, not summed)` : ""}`],
+        [kind === "cashflow" ? "Made" : "In", money(totals.inCents)],
+        [kind === "expense" || kind === "cashflow" ? "Spent (net of refunds)" : "Out", money(totals.outCents)],
+        ["Net", signed(totals.netCents)],
       ]),
-    ),
+      table(
+        [{ head: "ID", align: "r" }, { head: "DATE" }, { head: "MERCHANT" }, { head: "AMOUNT", align: "r" }, { head: "CATEGORY" }, { head: "ACCOUNT" }, { head: "FLAGS" }],
+        rows.map((t) => [
+          t.id,
+          isoDate(t.postedAt),
+          clip(t.merchantRaw, 32),
+          money(t.amountCents),
+          clip(t.category?.name ?? "—", 18),
+          clip(t.account?.name ?? "", 20),
+          [t.isTransfer && "transfer", t.isRefund && "refund", t.isExcluded && "excluded", t.isPending && "pending"].filter(Boolean).join(","),
+        ]),
+      ),
+      rows.length < totals.count ? `showing ${rows.length} of ${totals.count}; raise --limit for more` : "",
+    ].filter(Boolean).join("\n"),
   );
 }
 
@@ -240,15 +263,35 @@ export async function earnings(a: Args, json: boolean) {
   );
 }
 
-export async function investments(_a: Args, json: boolean) {
-  const w = await getInvestmentsWorkspace();
-  emit(json, w, () =>
+/**
+ * Balances now, plus money in and out for a range read exactly as /investments
+ * reads it (`--period` defaults to ytd there too), from the same getInvestmentFlows.
+ */
+export async function investments(a: Args, json: boolean) {
+  const period = pick(a, "period", RANGE_PRESETS.map((p) => p.value));
+  const from = str(a, "from") ? isoDay(str(a, "from")!, "--from") : undefined;
+  const to = str(a, "to") ? isoDay(str(a, "to")!, "--to") : undefined;
+  if (a._.length) throw new Error(`unexpected "${a._.join(" ")}" — usage: fin investments [--period P | --from D --to D]`);
+  if ((from || to) && period) throw new Error("give one of --period or --from/--to");
+  if (!from !== !to) throw new Error("--from and --to go together");
+  const range = resolveRange(from ? { period: "custom", from, to } : { period }, { fallback: "ytd" });
+  const [w, flows] = await Promise.all([getInvestmentsWorkspace(), getInvestmentFlows({ from: range.from ?? undefined, to: range.to ?? undefined })]);
+  const data = {
+    range: { from: range.from, to: range.to, label: range.label },
+    totalCents: w.totalCents,
+    accounts: w.accounts.map(({ id, name, type, institution, balanceCents }) => ({ id, name, type, institution, balanceCents })),
+    flows,
+  };
+  emit(json, data, () =>
     [
       kv([
         ["Total invested value", money(w.totalCents)],
-        ["Contributions", `${money(w.contributionCents)} across ${w.contributionCount}`],
-        ["Investment income", money(w.investmentIncomeCents)],
-        ["Withdrawals / fees", `${money(w.withdrawalCents)} / ${money(w.feeCents)}`],
+        ["Range", range.from ? `${range.label} (${range.from} to ${range.to})` : range.label],
+        ["Contributions", money(flows.contributionCents)],
+        ["Deposits", money(flows.transferInCents)],
+        ["Dividends & interest", `${money(flows.dividendCents + flows.interestCents)} (dividends ${money(flows.dividendCents)}, interest ${money(flows.interestCents)})`],
+        ["Moved out", money(flows.transferOutCents)],
+        ["Fees", money(flows.feeCents)],
       ]),
       heading("Accounts"),
       table(
