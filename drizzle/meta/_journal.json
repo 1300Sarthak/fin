@@ -99,6 +99,13 @@
       "when": 1794468966373,
       "tag": "0013_budget_groups",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1794504994850,
+      "tag": "0014_goal_progress_kind",
+      "breakpoints": true
     }
   ]
 }
