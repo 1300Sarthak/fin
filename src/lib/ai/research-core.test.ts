@@ -128,3 +128,46 @@ describe("DCF scenario arithmetic", () => {
     expect(() => calculateValuation({ ...input, debt: Infinity })).toThrow();
   });
 });
+
+describe("research time budget", () => {
+  test("stops gathering once the reserve is reached and summarizes the evidence so far", async () => {
+    let clock = 0;
+    const options: CompleteOptions[] = [];
+    const result = await researchLoop(request, { ...dependencies(async (opts) => {
+      options.push(opts);
+      clock += 200_000; // each call is slow
+      return response(options.length === 1 ? { text: "", toolCalls: [call()], stopReason: "tool_use" } : {});
+    }), deadline: 240_000, now: () => clock });
+    expect(options.length).toBe(2);
+    expect(options[1].tools).toBeUndefined();
+    expect(options[1].system).toContain("final call");
+    expect(result.answer).toBe("Evidence-backed answer [S1].");
+    expect(result.limited).toBe(true);
+  });
+
+  test("a gathering call that overruns its budget is cut off and the run still answers", async () => {
+    const options: CompleteOptions[] = [];
+    const result = await researchLoop(request, { ...dependencies(async (opts) => {
+      options.push(opts);
+      if (options.length === 1) return response({ text: "", toolCalls: [call()], stopReason: "tool_use" });
+      if (options.length === 2) {
+        await new Promise((_, reject) => opts.signal!.addEventListener("abort", () => reject(opts.signal!.reason)));
+      }
+      return response();
+    }), deadline: Date.now() + RESEARCH_LIMITS.answerReserveMs + 50 });
+    expect(options.length).toBe(3);
+    expect(options[2].tools).toBeUndefined();
+    expect(result.answer).toBe("Evidence-backed answer [S1].");
+    expect(result.limited).toBe(true);
+  });
+
+  test("the caller's own cancellation still fails the run", async () => {
+    const controller = new AbortController();
+    const run = researchLoop(request, { ...dependencies(async (opts) => {
+      await new Promise((_, reject) => opts.signal!.addEventListener("abort", () => reject(opts.signal!.reason)));
+      return response();
+    }), signal: controller.signal, deadline: Date.now() + 600_000 });
+    controller.abort();
+    await expect(run).rejects.toBeDefined();
+  });
+});
