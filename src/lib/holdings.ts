@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { holdings, accounts } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
+import { isInvestmentAccountType } from "@/lib/cashflow-scope";
 
 /**
  * What is actually held, as opposed to what it is worth. `getAccountTotals`
@@ -103,4 +104,49 @@ export async function getPortfolioSummary(accountId?: number): Promise<Portfolio
     topConcentrationPct: top && total ? (top.marketValueCents / total) * 100 : 0,
     topSymbol: top?.symbol ?? null,
   };
+}
+
+/**
+ * Why the Investments headline and `fin holdings` disagree. The headline is
+ * active investment-account balances as the institutions report them, which
+ * include cash not listed as a position; `fin holdings` sums every position,
+ * including ones held in a non-investment account (a cash-management account).
+ */
+export type InvestmentValueGap = {
+  /** Active investment-account balances: the Investments headline. */
+  accountValueCents: number;
+  /** Positions inside those same accounts. */
+  positionsCents: number;
+  /** accountValue − positions: cash the account holds outside its positions. */
+  uninvestedCents: number;
+  /** Positions in any other account; `fin holdings` counts these too. */
+  positionsElsewhereCents: number;
+  /** Every position: the `fin holdings` total. */
+  allPositionsCents: number;
+};
+
+export async function getInvestmentValueGap(): Promise<InvestmentValueGap> {
+  const [accts, rows] = await Promise.all([
+    db.select({ id: accounts.id, type: accounts.type, isActive: accounts.isActive, balanceCents: accounts.currentBalanceCents }).from(accounts),
+    db.select({ accountId: holdings.accountId, valueCents: holdings.marketValueCents }).from(holdings),
+  ]);
+  const inScope = new Set(accts.filter((a) => a.isActive && isInvestmentAccountType(a.type)).map((a) => a.id));
+  const accountValueCents = accts.filter((a) => inScope.has(a.id)).reduce((s, a) => s + a.balanceCents, 0);
+  const positionsCents = rows.filter((r) => inScope.has(r.accountId)).reduce((s, r) => s + r.valueCents, 0);
+  const allPositionsCents = rows.reduce((s, r) => s + r.valueCents, 0);
+  return {
+    accountValueCents,
+    positionsCents,
+    uninvestedCents: accountValueCents - positionsCents,
+    positionsElsewhereCents: allPositionsCents - positionsCents,
+    allPositionsCents,
+  };
+}
+
+/** The one-line explanation the page and the CLI both print. */
+export function investmentValueGapNote(g: InvestmentValueGap, usd: (cents: number) => string): string {
+  const elsewhere = g.positionsElsewhereCents
+    ? ` Positions across every account (fin holdings) are ${usd(g.allPositionsCents)}, including ${usd(g.positionsElsewhereCents)} held outside investment accounts.`
+    : "";
+  return `Account value ${usd(g.accountValueCents)} is positions ${usd(g.positionsCents)} plus ${usd(g.uninvestedCents)} of uninvested cash the accounts hold outside their positions.${elsewhere}`;
 }
