@@ -169,3 +169,177 @@ export function seSetAside(input: TakeHomeInput) {
  *   single rates 1.1%–14.63%, exemption allowance $168.30 each.
  * - FICA 6.2% + 1.45%; CA SDI 1.3% (DE 44, 2026).
  */
+export const WITHHOLDING_SOURCES = [
+  { title: "IRS Pub 15-T (2026): percentage method tables", url: "https://www.irs.gov/pub/irs-pdf/p15t.pdf" },
+  { title: "EDD DE 44 (2026): California withholding schedules", url: "https://www.edd.ca.gov/siteassets/files/pdf_pub_ctr/de44.pdf" },
+] as const;
+const FED_WH_ADJUST: Record<Status, number> = { single: 8_600, separate: 8_600, head: 8_600, joint: 12_900 };
+const FED_WH_FROM: Record<Status, number[]> = {
+  single: [7_500, 19_900, 57_900, 113_200, 209_275, 263_725, 648_100],
+  separate: [7_500, 19_900, 57_900, 113_200, 209_275, 263_725, 648_100],
+  head: [15_550, 33_250, 83_000, 121_250, 217_300, 271_750, 656_150],
+  joint: [19_300, 44_100, 120_100, 230_700, 422_850, 531_750, 788_000],
+};
+const FED_WH_RATES = [0.10, 0.12, 0.22, 0.24, 0.32, 0.35, 0.37];
+// DE 44 Table 5 (single); the joint table is exactly double. Head of household is approximated with the joint table.
+const CA_WH_FROM_SINGLE = [0, 11_079, 26_264, 41_452, 57_542, 72_724, 371_479, 445_771, 742_953, 1_000_000];
+const CA_WH_RATES = [0.011, 0.022, 0.044, 0.066, 0.088, 0.1023, 0.1133, 0.1243, 0.1353, 0.1463];
+const CA_WH_LOW_INCOME = { single: 18_896, separate: 18_896, joint: 37_791, head: 37_791 } as const;
+const CA_WH_STANDARD = { single: 5_706, separate: 5_706, joint: 11_412, head: 11_412 } as const;
+const CA_WH_ALLOWANCE = 168.3;
+
+const progressive = (amount: number, from: number[], rates: number[]) => {
+  let tax = 0;
+  for (let i = 0; i < from.length; i++) {
+    const upper = from[i + 1] ?? Infinity;
+    if (amount > from[i]) tax += (Math.min(amount, upper) - from[i]) * rates[i];
+  }
+  return tax;
+};
+
+export type PayrollOpts = { status: Status; periods: number; caAllowances: number; pretax401kCents: number; roth401kCents: number; hsaPayrollCents: number };
+export type Withholding = { grossCents: number; federalCents: number; ficaCents: number; caCents: number; sdiCents: number; netCents: number };
+
+/** Pure: one paycheck's withholding and net for a gross amount. */
+export function withholdingFor(grossCents: number, o: PayrollOpts): Withholding {
+  const fedWages = Math.max(0, grossCents - o.pretax401kCents - o.hsaPayrollCents) / 100;
+  const annualFed = Math.max(0, fedWages * o.periods - FED_WH_ADJUST[o.status]);
+  const federalCents = r((progressive(annualFed, [0, ...FED_WH_FROM[o.status]], [0, ...FED_WH_RATES]) / o.periods) * 100);
+  const ficaWages = Math.max(0, grossCents - o.hsaPayrollCents);
+  const ficaCents = r(ficaWages * (FICA.ss + FICA.medicare));
+  const caAnnual = (Math.max(0, grossCents - o.pretax401kCents) / 100) * o.periods;
+  const double = o.status === "joint" || o.status === "head";
+  let caCents = 0;
+  if (caAnnual > CA_WH_LOW_INCOME[o.status]) {
+    const taxable = Math.max(0, caAnnual - CA_WH_STANDARD[o.status]);
+    const tax = progressive(taxable, CA_WH_FROM_SINGLE.map((x) => (double ? x * 2 : x)), CA_WH_RATES) - o.caAllowances * CA_WH_ALLOWANCE;
+    caCents = r((Math.max(0, tax) / o.periods) * 100);
+  }
+  const sdiCents = r(ficaWages * CA_SDI);
+  return { grossCents, federalCents, ficaCents, caCents, sdiCents, netCents: grossCents - o.pretax401kCents - o.roth401kCents - o.hsaPayrollCents - federalCents - ficaCents - caCents - sdiCents };
+}
+
+/** Pure: the gross that nets to `netCents` (net = everything deposited anywhere). Bisection to the cent; net is monotonic in gross. */
+export function solveGross(netCents: number, o: PayrollOpts): Withholding {
+  let lo = netCents, hi = Math.max(netCents, 1) * 3 + o.pretax401kCents + o.roth401kCents + o.hsaPayrollCents;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (withholdingFor(mid, o).netCents < netCents) lo = mid; else hi = mid;
+  }
+  const a = withholdingFor(lo, o), b = withholdingFor(hi, o);
+  return Math.abs(a.netCents - netCents) <= Math.abs(b.netCents - netCents) ? a : b;
+}
+
+export type PayLeg = {
+  txnId: number; date: string; account: string; accountId: number; cents: number; kind: "bank" | "roth-ira" | "hsa" | "401k";
+  /** A 401(k) deposit spread over several paydays: this paycheck's slice is `cents` of `totalCents`, one of `paydays`. */
+  share?: { totalCents: number; paydays: number };
+};
+export type Paycheck = { date: string; legs: PayLeg[]; netCents: number; deferral401kCents: number; hsaCents: number };
+
+/**
+ * Pure: group a job's money into paychecks. Bank deposits and Roth IRA
+ * direct deposits within 4 days are one paycheck; HSA deposits within 3 days
+ * join it. A 401(k) deposit covers every payday since the previous 401(k)
+ * deposit (the plan often posts several paydays' deferrals at once), split
+ * evenly; the first one of the year covers only the nearest payday up to 7 days
+ * before it, since nothing says deferrals started earlier. Anything that fits
+ * no paycheck is returned as `stray`.
+ */
+export function buildPaychecks(legs: PayLeg[]): { paychecks: Paycheck[]; stray: PayLeg[] } {
+  const anchors = legs.filter((l) => l.kind === "bank" || l.kind === "roth-ira").sort((a, b) => a.date.localeCompare(b.date) || a.txnId - b.txnId);
+  const paychecks: Paycheck[] = [];
+  for (const l of anchors) {
+    const last = paychecks.at(-1);
+    if (last && daysBetween(last.date, l.date) <= 4) last.legs.push(l);
+    else paychecks.push({ date: l.date, legs: [l], netCents: 0, deferral401kCents: 0, hsaCents: 0 });
+  }
+  const stray: PayLeg[] = [];
+  const nearest = (l: PayLeg, before: number, after: number) => paychecks
+    .filter((p) => { const d = daysBetween(p.date, l.date); return d >= -before && d <= after; })
+    .sort((a, b) => Math.abs(daysBetween(a.date, l.date)) - Math.abs(daysBetween(b.date, l.date)))[0];
+  for (const l of legs.filter((x) => x.kind === "hsa")) { const p = nearest(l, 3, 3); if (p) { p.legs.push(l); p.hsaCents += l.cents; } else stray.push(l); }
+  let previous: string | null = null;
+  for (const l of legs.filter((x) => x.kind === "401k").sort((a, b) => a.date.localeCompare(b.date) || a.txnId - b.txnId)) {
+    const span = previous == null ? [] : paychecks.filter((p) => p.date > previous! && daysBetween(p.date, l.date) >= -1);
+    const covered = span.length ? span : [nearest(l, 1, 7)].filter((p): p is Paycheck => !!p);
+    previous = l.date;
+    if (!covered.length) { stray.push(l); continue; }
+    const each = Math.floor(l.cents / covered.length);
+    covered.forEach((p, i) => {
+      const cents = i === covered.length - 1 ? l.cents - each * (covered.length - 1) : each;
+      p.legs.push(covered.length > 1 ? { ...l, cents, share: { totalCents: l.cents, paydays: covered.length } } : l);
+      p.deferral401kCents += cents;
+    });
+  }
+  for (const p of paychecks) p.netCents = p.legs.filter((l) => l.kind === "bank" || l.kind === "roth-ira").reduce((n, l) => n + l.cents, 0);
+  return { paychecks, stray };
+}
+const medianOf = (xs: number[]) => {
+  if (!xs.length) return null;
+  const v = [...xs].sort((a, b) => a - b), m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+};
+const daysBetween = (a: string, b: string) => Math.round((utc(b) - utc(a)) / DAY_MS);
+
+/* ------------------------------ W-2 gross estimate ------------------------------ */
+
+const DAY_MS = 86_400_000;
+const utc = (d: string) => Date.parse(`${d}T00:00:00Z`);
+export const addDays = (d: string, n: number) => new Date(utc(d) + n * DAY_MS).toISOString().slice(0, 10);
+
+export type PayrollAssumptions = { annualSalaryCents: number; fullTimeStart: string | null; periods: number; caAllowances: number; k401Type: "pretax" | "roth"; k401Pct: number | null; hsaPayroll: boolean; projectRest: boolean };
+export type ReconstructedPaycheck = Paycheck & Withholding & {
+  fullTime: boolean; incomplete: boolean; expectedGrossCents: number | null; residualCents: number | null;
+  /** What the year total uses: the rebuilt gross, or salary ÷ periods for a full-time check whose legs are still posting. */
+  counted: Withholding;
+};
+
+/**
+ * Pure: the year's W-2 pay rebuilt from the ledger. Each paycheck's net
+ * (bank + Roth IRA direct deposit; HSA deposits too unless they are payroll
+ * pre-tax) is grossed up through the withholding model. Full-time checks are
+ * compared against salary ÷ periods, and the year is projected at that rate
+ * through Dec 31.
+ */
+export function reconstructPayroll(paychecks: Paycheck[], a: PayrollAssumptions, status: Status, year: number, today: string) {
+  const perCheck = r(a.annualSalaryCents / a.periods);
+  const rows: ReconstructedPaycheck[] = paychecks.map((p) => {
+    const hsaPre = a.hsaPayroll ? p.hsaCents : 0;
+    const net = p.netCents + (a.hsaPayroll ? 0 : p.hsaCents);
+    const w = solveGross(net, { status, periods: a.periods, caAllowances: a.caAllowances, pretax401kCents: a.k401Type === "pretax" ? p.deferral401kCents : 0, roth401kCents: a.k401Type === "roth" ? p.deferral401kCents : 0, hsaPayrollCents: hsaPre });
+    // The first check after the start date usually covers part intern, part full-time: not a fair comparison.
+    const fullTime = !!a.fullTimeStart && daysBetween(a.fullTimeStart, p.date) >= 14;
+    // 401(k) and HSA legs post up to a week after payday, so a recent check may still be missing money.
+    const incomplete = daysBetween(p.date, today) < 7;
+    const compared = fullTime && !incomplete;
+    return { ...p, ...w, counted: w, fullTime, incomplete, expectedGrossCents: compared ? perCheck : null, residualCents: compared ? w.grossCents - perCheck : null };
+  });
+  const sum = (f: (x: ReconstructedPaycheck) => number) => rows.reduce((n, x) => n + f(x), 0);
+  const complete = rows.filter((x) => x.fullTime && !x.incomplete && x.grossCents > 0);
+  // Deferral rate: the user's election when given, else the median share of gross over complete full-time checks.
+  const observed = medianOf(complete.map((x) => x.deferral401kCents / x.grossCents));
+  const k401Rate = a.k401Pct != null ? a.k401Pct / 100 : observed ?? 0;
+  const deferralPerCheck = r(k401Rate * perCheck);
+  const hsaPerCheck = complete.at(-1)?.hsaCents ?? 0;
+  const salaryCheck = withholdingFor(perCheck, { status, periods: a.periods, caAllowances: a.caAllowances, pretax401kCents: a.k401Type === "pretax" ? deferralPerCheck : 0, roth401kCents: a.k401Type === "roth" ? deferralPerCheck : 0, hsaPayrollCents: a.hsaPayroll ? hsaPerCheck : 0 });
+  // A full-time check still posting is counted at the salary rate, including the deferral that has not posted yet.
+  let postingDeferral = 0;
+  for (const x of rows) if (x.fullTime && x.incomplete && x.grossCents < perCheck) { x.counted = salaryCheck; postingDeferral += Math.max(0, deferralPerCheck - x.deferral401kCents); }
+  const last = rows.at(-1);
+  const remaining: string[] = [];
+  if (a.projectRest && last && a.fullTimeStart && last.date >= a.fullTimeStart) {
+    const step = Math.round(365 / a.periods);
+    for (let d = addDays(last.date, step); d <= `${year}-12-31`; d = addDays(d, step)) remaining.push(d);
+  }
+  const n = remaining.length;
+  return {
+    paychecks: rows, perCheckCents: perCheck, remainingPaydays: remaining, salaryCheck,
+    k401: { rate: k401Rate, source: a.k401Pct != null ? "your election" as const : observed != null ? "median of complete full-time checks" as const : "none observed" as const, perCheckCents: deferralPerCheck, postingCents: postingDeferral },
+    ytd: { grossCents: sum((x) => x.counted.grossCents), netCents: sum((x) => x.netCents), deferral401kCents: sum((x) => x.deferral401kCents) + postingDeferral, hsaCents: sum((x) => x.hsaCents), federalCents: sum((x) => x.counted.federalCents), caCents: sum((x) => x.counted.caCents), ficaCents: sum((x) => x.counted.ficaCents), sdiCents: sum((x) => x.counted.sdiCents) },
+    projected: { grossCents: n * perCheck, deferral401kCents: n * deferralPerCheck, hsaCents: n * hsaPerCheck, federalCents: n * salaryCheck.federalCents, caCents: n * salaryCheck.caCents },
+    /** Mean gross − expected over the full-time checks; null when there are none. */
+    meanResidualCents: rows.some((x) => x.residualCents != null) ? r(sum((x) => x.residualCents ?? 0) / rows.filter((x) => x.residualCents != null).length) : null,
+  };
+}
+export type Payroll = ReturnType<typeof reconstructPayroll>;
