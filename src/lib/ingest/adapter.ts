@@ -7,10 +7,11 @@ import {
   type AccountType,
   holdings,
 } from "@/db/schema";
-import { and, eq, gte, inArray, isNotNull, notInArray } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, ne, notInArray } from "drizzle-orm";
 import { ACCOUNT_TYPE_META } from "@/lib/accounts";
 import { isoDate } from "@/lib/format";
 import { chunk } from "@/lib/normalize";
+import { keepSplitShares } from "@/lib/assistant/split-sync";
 
 /* ------------------------------ normalized shapes ----------------------------- */
 
@@ -250,6 +251,8 @@ async function upsertTransactions(
         and(
           eq(transactions.accountId, accountId),
           gte(transactions.postedAt, earliest),
+          // Assistant-made split rows have no provider id; never adopt one.
+          ne(transactions.source, "split"),
         ),
       );
 
@@ -334,6 +337,8 @@ async function upsertTransactions(
         ),
       );
   }
+
+  await keepSplitShares(accountId);
 
   return {
     inserted: genuinelyNew.length,
