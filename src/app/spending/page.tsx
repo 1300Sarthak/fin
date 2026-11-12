@@ -1,266 +1,222 @@
 import Link from "next/link";
-import { format, subMonths, addMonths, endOfMonth } from "date-fns";
-import { PageHeader } from "@/components/page-header";
-import { EmptyState } from "@/components/empty-state";
+import type { ReactNode } from "react";
+import { ArrowDownRight, ArrowUpRight, PieChart } from "lucide-react";
+import { format, parseISO } from "date-fns";
 import { ConnectDataActions, NO_DATA_DESCRIPTION } from "@/components/connect-data";
-import { SpendingExplorer } from "@/components/spending-explorer";
-import { CashflowTrendChart } from "@/components/cashflow-trend-chart";
-import { BudgetDialog } from "@/components/budget-dialog";
-import { AccountFilter } from "@/components/account-filter";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { buttonVariants } from "@/components/ui/button";
-import { PieChart, ChevronLeft, ChevronRight } from "lucide-react";
-import {
-  monthRange,
-  getCashflow,
-  getSpendingByCategory,
-  getSpendingByAccount,
-  getMonthlyTrend,
-  getTopMerchants,
-  getBudgetsWithActual,
-  getSpendingTransactions,
-} from "@/lib/spending";
-import {
-  getCategoriesForSelect,
-  countTransactions,
-  getSpendableAccounts,
-} from "@/lib/queries";
-import { formatUSD, formatSigned } from "@/lib/format";
+import { EmptyState, HelpTip, Money, PageHeader, RangePicker, resolveRange } from "@/components/kit";
+import { SpendingFlowChart } from "@/components/spending-flow-chart";
+import { SpendingBreakdown, type BreakdownItem } from "@/components/spending-breakdown";
+import { SpendingAccountSelect } from "@/components/spending-account-select";
+import { BudgetGroupsPanel } from "@/components/budget-groups-panel";
+import { txnHref } from "@/components/spending-links";
+import { getSpendingByAccount, getSpendingByCategory, getSpendingTransactions, getTopMerchants } from "@/lib/spending";
+import { concreteRange, daySpan, getCashflowBuckets, getSpendingSummary } from "@/lib/spending-summary";
+import { getBudgetGroupsReport, getCategoryNodes } from "@/lib/budget-groups";
+import { countTransactions, getCategoriesForSelect, getSpendableAccounts } from "@/lib/queries";
+import { formatUSD } from "@/lib/format";
 import { cn } from "@/lib/utils";
-
-const catKey = (id: number | null) => (id == null ? "none" : String(id));
 
 export const dynamic = "force-dynamic";
 
-function barColor(pct: number) {
-  if (pct >= 1) return "bg-negative";
-  if (pct >= 0.8) return "bg-warning";
-  return "bg-positive";
+type Params = Record<string, string | string[] | undefined>;
+const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+const short = (iso: string, withYear = false) => format(parseISO(iso), withYear ? "MMM d, yyyy" : "MMM d");
+
+/** Older links used `?month=YYYY-MM`; read them as that whole month. */
+function withLegacyMonth(params: Params): Params {
+  const month = one(params.month);
+  if (!month || params.period || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return params;
+  const [y, m] = month.split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return { ...params, period: "custom", from: `${month}-01`, to: `${month}-${String(last).padStart(2, "0")}` };
 }
 
-export default async function SpendingPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ month?: string; account?: string; category?: string }>;
-}) {
-  const { month, account, category } = await searchParams;
-  const validMonth = typeof month === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
-  const requestedAccountId = typeof account === "string" && /^\d+$/.test(account) ? Number(account) : undefined;
-  const initialCategoryId = typeof category === "string" && /^(none|\d+)$/.test(category) ? category : undefined;
-  const r = monthRange(validMonth ? month : undefined);
-  const [accounts, cats] = await Promise.all([getSpendableAccounts(), getCategoriesForSelect()]);
-  const accountId = accounts.some((item) => item.id === requestedAccountId)
-    ? requestedAccountId
-    : undefined;
-  // The spending queries take a list of account ids (undefined = all spendable).
-  const accountIds = accountId !== undefined ? [accountId] : undefined;
-  const [cashflow, byCategory, byAccount, trend, merchants, budgetRows, total, explorerTransactions] =
-    await Promise.all([
-      getCashflow(r, accountIds),
-      getSpendingByCategory(r, accountIds),
-      getSpendingByAccount(r, accountIds),
-      getMonthlyTrend(6, accountId),
-      getTopMerchants(r, 8, accountIds),
-      getBudgetsWithActual(r, accountIds),
-      countTransactions(),
-      getSpendingTransactions(r, accountIds),
-    ]);
+export default async function SpendingPage({ searchParams }: { searchParams: Promise<Params> }) {
+  const params = withLegacyMonth(await searchParams);
+  const range = resolveRange(params, { fallback: "this-month" });
+  const accountParam = one(params.account);
+  const categoryParam = one(params.category);
+  const [accounts, total] = await Promise.all([getSpendableAccounts(), countTransactions()]);
+  const account = accounts.find((a) => String(a.id) === accountParam)?.id;
+  const accountIds = account === undefined ? undefined : [account];
 
+  const header = (
+    <PageHeader
+      title="Spending"
+      description="Where your money went, and how this month is pacing."
+      actions={<><SpendingAccountSelect accounts={accounts} /><RangePicker value={range} fallback="this-month" /></>}
+    />
+  );
   if (total === 0) {
-    return (
-      <>
-        <PageHeader
-          title="Spending"
-          description="Where your money goes — by category, merchant, and month."
-        />
-        <EmptyState
-          icon={PieChart}
-          title="Nothing to analyse yet"
-          description={NO_DATA_DESCRIPTION}
-          action={<ConnectDataActions />}
-        />
-      </>
-    );
+    return <>{header}<EmptyState icon={PieChart} title="Nothing to analyse yet" description={NO_DATA_DESCRIPTION} action={<ConnectDataActions />} /></>;
   }
 
-  const prev = format(subMonths(r.start, 1), "yyyy-MM");
-  const next = format(addMonths(r.start, 1), "yyyy-MM");
-  // daily average: elapsed days this month, or full days for a past month
-  const isCurrentMonth = r.key === format(new Date(), "yyyy-MM");
-  const daysElapsed = isCurrentMonth
-    ? new Date().getDate()
-    : endOfMonth(r.start).getDate();
-  const dailyAvg = Math.round(cashflow.spendingCents / Math.max(1, daysElapsed));
+  const { from, to } = await concreteRange(range.from, range.to);
+  const span = daySpan(from, to);
+  const [summary, byCategory, byAccount, merchants, transactions, buckets, budgets, nodes, selectCategories] = await Promise.all([
+    getSpendingSummary({ from: range.from, to: range.to }, accountIds),
+    getSpendingByCategory(span, accountIds),
+    getSpendingByAccount(span, accountIds),
+    getTopMerchants(span, 30, accountIds),
+    getSpendingTransactions(span, accountIds),
+    getCashflowBuckets(from, to, accountIds),
+    getBudgetGroupsReport(to.slice(0, 7), accountIds),
+    getCategoryNodes(),
+    getCategoriesForSelect(),
+  ]);
 
-  // The interactive explorer receives the complete, already-filtered month of
-  // spending activity. It can then combine category and card selections instantly.
-  // preserve the account filter across month navigation
-  const acctQS = accountId !== undefined ? `&account=${accountId}` : "";
+  const flow = summary.cashflow;
+  const prev = summary.previous;
+  const spendDelta = prev ? flow.spendingCents - prev.cashflow.spendingCents : null;
+  const burnDelta = prev ? summary.burn.burnPct - prev.burnPct : null;
+  const link = { from, to, account };
+  const nodeName = new Map(nodes.map((n) => [n.id, n]));
+  const parentOf = (id: number | null) => {
+    const p = id == null ? undefined : nodeName.get(id)?.parentId;
+    return p == null ? undefined : nodeName.get(p)?.name;
+  };
+
+  const items: Record<"category" | "card" | "merchant", BreakdownItem[]> = {
+    category: byCategory.map((c) => ({
+      id: c.categoryId == null ? "none" : String(c.categoryId),
+      name: c.name,
+      context: parentOf(c.categoryId),
+      spentCents: c.spentCents,
+      refundedCents: c.refundedCents,
+      count: c.count,
+      link: { category: c.name },
+    })),
+    card: byAccount.map((a) => ({
+      id: String(a.accountId),
+      name: a.name,
+      spentCents: a.spentCents,
+      refundedCents: a.refundedCents,
+      count: a.count,
+      link: { account: a.accountId },
+    })),
+    merchant: merchants.map((m) => ({
+      id: m.merchant,
+      name: m.merchant || "Unnamed merchant",
+      spentCents: m.spentCents,
+      count: m.count,
+      link: { merchant: m.merchant },
+    })),
+  };
+  const initialCategory = categoryParam
+    ? items.category.find((c) => c.id === categoryParam || c.name.toLowerCase() === categoryParam.toLowerCase())
+    : undefined;
+  const expenseCategories = nodes.filter((n) => n.kind === "expense").map((n) => ({ id: n.id, name: n.name, parentId: n.parentId }));
 
   return (
     <>
-      <PageHeader
-        title="Spending"
-        description="Where your money goes — by category, merchant, and month."
-      >
-        <AccountFilter accounts={accounts} />
-        <BudgetDialog categories={cats} />
-      </PageHeader>
+      {header}
 
-      <div className="mb-4 flex items-center gap-2">
-        <Link
-          href={`/spending?month=${prev}${acctQS}`}
-          className={cn(buttonVariants({ variant: "outline", size: "icon" }), "size-8")}
-          aria-label="Previous month"
-        >
-          <ChevronLeft className="size-4" />
-        </Link>
-        <span className="min-w-40 text-center text-sm font-medium">{r.label}</span>
-        <Link
-          href={`/spending?month=${next}${acctQS}`}
-          className={cn(buttonVariants({ variant: "outline", size: "icon" }), "size-8")}
-          aria-label="Next month"
-        >
-          <ChevronRight className="size-4" />
-        </Link>
+      {/* The one loud thing: what went out, against the period before, with the months around it. */}
+      <section aria-labelledby="spent-label" className="bg-card rounded-2xl border">
+        <div className="px-5 pt-5 md:px-6 md:pt-6">
+          <div id="spent-label" className="text-muted-foreground flex items-center gap-1 text-[13px]">
+            Spent, {short(from)} to {short(to)}
+            <HelpTip label="About spent">Purchases from spendable accounts net of refunds, pending holds included. Transfers, card payments, investing and excluded rows never count.</HelpTip>
+          </div>
+          <Link href={txnHref({ ...link, kind: "expense" })} className="mt-1 inline-block rounded-md text-[40px] leading-[1.1] font-semibold tracking-[-0.035em] outline-none focus-visible:ring-2 focus-visible:ring-ring md:text-[46px]">
+            <Money cents={flow.spendingCents} dimCents />
+          </Link>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[13px]">
+            {spendDelta != null && prev ? (
+              <Link href={txnHref({ from: prev.from, to: prev.to, kind: "expense", account })} className="hover:text-foreground rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <SpendDelta cents={spendDelta} /> <span className="text-muted-foreground">vs {short(prev.from, prev.to.slice(0, 4) !== to.slice(0, 4))} to {short(prev.to, prev.to.slice(0, 4) !== to.slice(0, 4))} ({formatUSD(prev.cashflow.spendingCents)})</span>
+              </Link>
+            ) : (
+              <span className="text-muted-foreground">Across {summary.days} days</span>
+            )}
+          </div>
+        </div>
+        <div className="px-2 pt-4 md:px-4">
+          <SpendingFlowChart data={buckets} account={account} />
+        </div>
+        <dl className="bg-border mt-2 grid grid-cols-2 gap-px overflow-hidden rounded-b-2xl border-t md:grid-cols-5">
+          <HeroStat label="Made" href={txnHref({ ...link, kind: "income" })} help="Money that landed in spendable accounts. Refunds are netted out of spending instead.">
+            <Money cents={flow.incomeCents} tone="positive" />
+          </HeroStat>
+          <HeroStat label="Net" href={txnHref({ ...link, kind: "cashflow" })} help="Made minus spent, for the same accounts. Opens exactly the rows behind both.">
+            <Money cents={flow.net} signed tone="auto" />
+          </HeroStat>
+          <HeroStat
+            label="Burn rate"
+            help={`Net spending ÷ take-home pay for the whole household, the same numbers as fin burn: ${formatUSD(summary.burn.netSpendCents)} spent of ${formatUSD(summary.burn.takeHomeCents)} taken home (${formatUSD(summary.burn.earnedCents)} earned incl. pre-tax). Ignores the account filter, and take-home is not a list of transactions, so this one has no drill-down.`}
+            sub={burnDelta != null ? `${burnDelta > 0 ? "+" : ""}${burnDelta.toFixed(1)} pts vs before` : `of ${formatUSD(summary.burn.takeHomeCents, false)} take-home`}
+            subTone={burnDelta == null ? undefined : burnDelta > 0 ? "text-negative" : "text-positive"}
+          >
+            <span className={cn(summary.burn.burnPct > 100 && "text-negative")}>{summary.burn.burnPct.toFixed(1)}%</span>
+          </HeroStat>
+          <HeroStat label="Daily average" href={txnHref({ ...link, kind: "expense" })} help="Spent divided by the days in the range so far." sub={`over ${summary.days} ${summary.days === 1 ? "day" : "days"}`}>
+            <Money cents={summary.dailyAvgCents} />
+          </HeroStat>
+          {summary.projectedMonthEndCents != null ? (
+            <HeroStat label="Projected month end" help="This month's daily average carried to the last day." sub={budgets.groups.length ? `budget ${formatUSD(budgets.total.limitCents, false)}` : undefined} className="col-span-2 md:col-span-1">
+              <span className={cn(budgets.groups.length > 0 && summary.projectedMonthEndCents > budgets.total.limitCents && "text-warning")}>
+                <Money cents={summary.projectedMonthEndCents} />
+              </span>
+            </HeroStat>
+          ) : (
+            <HeroStat label="Refunded" href={`/refunds?${new URLSearchParams({ period: "custom", from, to })}`} help="Money given back against purchases, already netted out of spent." className="col-span-2 md:col-span-1">
+              <Money cents={flow.refundCents} />
+            </HeroStat>
+          )}
+        </dl>
+      </section>
+
+      <div className="mt-10">
+        <BudgetGroupsPanel report={budgets} categories={expenseCategories} account={account} />
       </div>
 
-      <Card className="mb-6">
-        <CardContent className="flex flex-wrap items-center gap-x-10 gap-y-4 py-5">
-          <div>
-            <div className="text-muted-foreground text-xs">Made</div>
-            <div className="text-2xl font-semibold text-positive tabular-nums">
-              {formatUSD(cashflow.incomeCents)}
-            </div>
-          </div>
-          <div>
-            <div className="text-muted-foreground text-xs">Spent</div>
-            <div className="text-2xl font-semibold text-negative tabular-nums">
-              {formatUSD(cashflow.spendingCents)}
-            </div>
-          </div>
-          <div>
-            <div className="text-muted-foreground text-xs">Net</div>
-            <div
-              className={cn(
-                "text-2xl font-semibold tabular-nums",
-                cashflow.net >= 0 ? "text-positive" : "text-negative",
-              )}
-            >
-              {formatSigned(cashflow.net)}
-            </div>
-          </div>
-          <div>
-            <div className="text-muted-foreground text-xs">Daily avg spend</div>
-            <div className="text-2xl font-semibold tabular-nums">{formatUSD(dailyAvg)}</div>
-            <div className="text-muted-foreground text-xs">
-              over {daysElapsed} day{daysElapsed === 1 ? "" : "s"}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-base">Spending breakdown · {r.label}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <SpendingExplorer
-            categories={byCategory.map((c) => ({
-              id: catKey(c.categoryId),
-              name: c.name,
-              spentCents: c.spentCents,
-              count: c.count,
-              pct: c.pct,
-            }))}
-            cards={byAccount.map((a) => ({
-              id: String(a.accountId),
-              name: a.name,
-              spentCents: a.spentCents,
-              count: a.count,
-            }))}
-            transactions={explorerTransactions}
-            categoriesForSelect={cats}
-            initialCategoryId={initialCategoryId}
-          />
-        </CardContent>
-      </Card>
-
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-base">Cash flow (6 months)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <CashflowTrendChart data={trend} />
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Top merchants</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {merchants.length === 0 ? (
-              <p className="text-muted-foreground text-sm">No merchants this month.</p>
-            ) : (
-              <div className="divide-y">
-                {merchants.map((m) => (
-                  <div
-                    key={m.merchant}
-                    className="flex items-center justify-between py-2 text-sm"
-                  >
-                    <span className="truncate">{m.merchant}</span>
-                    <div className="text-right">
-                      <div className="tabular-nums">{formatUSD(m.spentCents)}</div>
-                      <div className="text-muted-foreground text-xs">
-                        {m.count} {m.count === 1 ? "txn" : "txns"}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Budgets</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {budgetRows.length === 0 ? (
-              <p className="text-muted-foreground text-sm">
-                No budgets yet. Use “Set budget” to track spending against a limit.
-              </p>
-            ) : (
-              budgetRows.map((b) => (
-                <div key={b.id} className="space-y-1">
-                  <div className="flex items-center justify-between text-sm">
-                    <span>{b.name}</span>
-                    <span
-                      className={cn("tabular-nums", b.pct >= 1 && "text-negative")}
-                    >
-                      {formatUSD(b.spentCents)} / {formatUSD(b.limitCents)}
-                    </span>
-                  </div>
-                  <div className="bg-muted h-2 overflow-hidden rounded-full">
-                    <div
-                      className={cn("h-full rounded-full", barColor(b.pct))}
-                      style={{ width: `${Math.min(100, b.pct * 100)}%` }}
-                    />
-                  </div>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
+      <div className="mt-10">
+        <SpendingBreakdown
+          items={items}
+          transactions={transactions}
+          categories={selectCategories}
+          range={{ from, to, account }}
+          totalCents={flow.spendingCents}
+          initial={initialCategory ? { view: "category", id: initialCategory.id } : undefined}
+        />
       </div>
     </>
+  );
+}
+
+/** Spending going up is the bad direction, so the colours are the reverse of DeltaText's. */
+function SpendDelta({ cents }: { cents: number }) {
+  const up = cents > 0;
+  const Icon = up ? ArrowUpRight : ArrowDownRight;
+  return (
+    <span className={cn("num inline-flex items-center gap-0.5 font-medium", up ? "text-negative" : "text-positive")}>
+      <Icon className="size-3.5" aria-hidden="true" />
+      <span className="sr-only">{up ? "up" : "down"} </span>
+      {formatUSD(Math.abs(cents))}
+    </span>
+  );
+}
+
+function HeroStat({ label, href, help, sub, subTone, className, children }: {
+  label: string;
+  href?: string;
+  help?: string;
+  sub?: string;
+  subTone?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  const value = <span className="num block text-[17px] leading-6 font-semibold tracking-[-0.01em] md:text-lg">{children}</span>;
+  return (
+    <div className={cn("bg-card min-w-0 px-5 py-3.5 md:px-6 md:py-4", className)}>
+      <dt className="text-muted-foreground flex items-center gap-1 text-[12.5px]">
+        <span className="truncate">{label}</span>
+        {help && <HelpTip label={`About ${label.toLowerCase()}`}>{help}</HelpTip>}
+      </dt>
+      <dd className="mt-0.5">
+        {href ? <Link href={href} className="pressable inline-block rounded-sm outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring">{value}</Link> : value}
+        {sub && <span className={cn("text-muted-foreground mt-0.5 block truncate text-xs", subTone)}>{sub}</span>}
+      </dd>
+    </div>
   );
 }
