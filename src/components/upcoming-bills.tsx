@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -9,24 +8,19 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { addWeeks, parseISO, startOfWeek } from "date-fns";
-import { ChevronDown, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Badge } from "@/components/ui/badge";
-import { Card } from "@/components/ui/card";
 import {
   formatCompact,
   formatDate,
   formatDateShort,
   formatUSD,
-  isoDate,
 } from "@/lib/format";
-import { cn } from "@/lib/utils";
 import { useReducedMotion } from "@/components/use-reduced-motion";
 
 /** Dates cross the server/client boundary as `yyyy-MM-dd` so both sides agree. */
@@ -52,148 +46,6 @@ export type LowBalanceView = {
   minBalanceCents: number;
   minDate: string;
 };
-
-const CADENCE_LABEL: Record<string, string> = {
-  weekly: "Weekly",
-  biweekly: "Every 2 weeks",
-  monthly: "Monthly",
-  quarterly: "Quarterly",
-  yearly: "Yearly",
-};
-
-function dueLabel(daysAway: number) {
-  if (daysAway <= 0) return "Today";
-  if (daysAway === 1) return "Tomorrow";
-  return `in ${daysAway} days`;
-}
-
-/* --------------------------------- bill list ---------------------------------- */
-
-type Week = { key: string; label: string; bills: UpcomingBillView[]; totalCents: number };
-
-function groupByWeek(bills: UpcomingBillView[], todayISO: string): Week[] {
-  const thisWeek = isoDate(startOfWeek(parseISO(todayISO)));
-  const nextWeek = isoDate(addWeeks(parseISO(thisWeek), 1));
-
-  const weeks = new Map<string, Week>();
-  for (const b of bills) {
-    const key = isoDate(startOfWeek(parseISO(b.dueAt)));
-    const week =
-      weeks.get(key) ??
-      weeks
-        .set(key, {
-          key,
-          label:
-            key === thisWeek
-              ? "This week"
-              : key === nextWeek
-                ? "Next week"
-                : `Week of ${formatDateShort(key)}`,
-          bills: [],
-          totalCents: 0,
-        })
-        .get(key)!;
-    week.bills.push(b);
-    week.totalCents += b.amountCents;
-  }
-  return [...weeks.values()];
-}
-
-export function UpcomingBills({
-  bills,
-  warning,
-  todayISO,
-}: {
-  bills: UpcomingBillView[];
-  warning: LowBalanceView;
-  todayISO: string;
-}) {
-  const [collapsed, setCollapsed] = useState<string[]>([]);
-  const weeks = groupByWeek(bills, todayISO);
-
-  const toggle = (key: string) =>
-    setCollapsed((c) => (c.includes(key) ? c.filter((k) => k !== key) : [...c, key]));
-
-  return (
-    <div className="space-y-4">
-      {warning.triggered && <LowBalanceBanner warning={warning} />}
-
-      {weeks.map((w) => {
-        const isCollapsed = collapsed.includes(w.key);
-        return (
-          <Card key={w.key} className="gap-0 py-0">
-            <button
-              type="button"
-              onClick={() => toggle(w.key)}
-              aria-expanded={!isCollapsed}
-              className="hover:bg-muted/50 flex w-full items-center gap-2 px-4 py-3 text-left transition-colors"
-            >
-              <ChevronDown
-                className={cn(
-                  "text-muted-foreground size-4 transition-transform",
-                  isCollapsed && "-rotate-90",
-                )}
-              />
-              <span className="text-sm font-medium">{w.label}</span>
-              <span className="text-muted-foreground text-xs">
-                {w.bills.length} {w.bills.length === 1 ? "bill" : "bills"}
-              </span>
-              <span className="ml-auto text-sm font-medium tabular-nums">
-                {formatUSD(w.totalCents)}
-              </span>
-            </button>
-
-            {!isCollapsed && (
-              <div className="divide-y border-t">
-                {w.bills.map((b) => {
-                  const bump = b.amountCents - b.expectedAmountCents;
-                  return (
-                    <div
-                      key={`${b.seriesId}-${b.dueAt}`}
-                      className="flex items-center gap-4 px-4 py-3"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="truncate font-medium">{b.name}</span>
-                          <Badge variant="outline" className="text-muted-foreground">
-                            {CADENCE_LABEL[b.cadence] ?? b.cadence}
-                          </Badge>
-                          {/* A day or two of slip is normal; only badge the ones
-                              recurring.ts already considers missed. */}
-                          {b.isLate && b.status === "missed" && (
-                            <Badge
-                              variant="outline"
-                              className="border-warning/40 bg-warning/10 text-warning"
-                            >
-                              Late — estimated
-                            </Badge>
-                          )}
-                        </div>
-                        <div className="text-muted-foreground mt-0.5 text-xs">
-                          {formatDate(b.dueAt)} · {dueLabel(b.daysAway)}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-medium tabular-nums">
-                          {formatUSD(b.amountCents)}
-                        </div>
-                        {b.status === "price_changed" && bump > 0 && (
-                          <div className="text-xs text-negative tabular-nums">
-                            +{formatUSD(bump)} vs usual
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
 
 /* ------------------------------ low-balance banner ----------------------------- */
 
