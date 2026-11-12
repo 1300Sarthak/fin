@@ -1,5 +1,6 @@
 import { bool, num, pick, RANGE, type Args } from "../args";
-import { emit, kv } from "../render";
+import { emit, kv, money } from "../render";
+import { getCashDrift } from "@/lib/cash";
 import { getResearchStatus, publicResearchError, runResearch } from "@/lib/ai/research";
 import { createResearchTools } from "@/lib/ai/research-tools";
 import { researchRequestSchema } from "@/lib/ai/research-types";
@@ -64,21 +65,27 @@ export async function context(_a: Args, json: boolean) {
   emit(json, data, () => JSON.stringify(data, null, 2));
 }
 
-/** Every line here comes from environment variables; nothing is dialled. */
+/** Keys come from environment variables, the cash check reads the local database; nothing is dialled. */
 export async function doctor(_a: Args, json: boolean) {
   const status = getResearchStatus();
   const url = process.env.DATABASE_URL ?? "file:finance.db";
   // A remote libSQL url carries its auth token, so only a local path is quotable.
   const database = url.startsWith("file:") ? url.slice(5) : "remote libSQL (url hidden)";
-  emit(json, { ok: true, database, ...status }, () => [
+  // The stored cash balance should equal the sum of its rows; any cash entry rebuilds it.
+  const cash = await getCashDrift();
+  emit(json, { ok: true, database, cash, ...status }, () => [
     "Research setup · checked locally, no API calls", kv([
       ["Database", database],
+      ["Cash balance", !cash ? "no cash account"
+        : cash.reconciled ? `${money(cash.storedCents)}, matches its rows`
+        : cash.fromRowsCents < 0 ? `rows sum to ${money(cash.fromRowsCents)}: more cash spent than ever added, so the $0 stored is a floor, not the truth; log the missing cash-in or fix a spend`
+        : `${money(cash.storedCents)} stored but its rows sum to ${money(cash.fromRowsCents)}; the next cash entry rebuilds it`],
       ...status.providers.map((provider): [string, string] => [provider.name, provider.configured ? "key configured (not network-tested)" : "optional key missing"]),
       ["Alpha Vantage", status.marketData ? "key configured" : "optional ALPHAVANTAGE_API_KEY missing"],
       ["Exa search", status.publicSearch ? "key configured" : "optional EXA_API_KEY missing"],
       ["Default AI", status.defaultProvider ?? "none — add an AI provider key"],
     ]), "", status.privacy,
-    "  AI: ANTHROPIC_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY. Optional models: ANTHROPIC_MODEL / OPENAI_MODEL / NIM_MODEL.",
+    "  AI: ANTHROPIC_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY. Optional models: ANTHROPIC_MODEL / OPENAI_MODEL / NIM_MODEL; NIM research and the assistant use ASSISTANT_MODEL.",
     "  Without --run, fin research only prints what a run would cost and send.",
     "  Examples: fin research \"Compare AAPL and MSFT cash flow\" --json",
     "            fin research \"Review my reserve plan\" --run --with-context --json",
