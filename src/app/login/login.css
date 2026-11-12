@@ -1,0 +1,19 @@
+/*
+ * Sign-in screen. The root layout renders no shell on /login (proxy sets
+ * x-fin-bare), but app/template.tsx still wraps the route in .page-enter, and a
+ * transformed ancestor would break `position: fixed` for its first 420ms.
+ */
+body:has([data-login-screen]) .page-enter { animation: none; }
+
+/* One orchestrated entrance: mark, heading, form drop in 45ms apart. Enter = ease-out, under 400ms. */
+@keyframes login-drop {
+  from { opacity: 0; transform: translateY(-10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+.login-drop { animation: login-drop 380ms var(--ease-out) both; animation-delay: calc(var(--i, 0) * 45ms); }
+
+.login-check { accent-color: var(--brand); }
+
+@media (prefers-reduced-motion: reduce) {
+  .login-drop { animation: fade var(--dur-fast) linear both; animation-delay: 0ms; }
+}
