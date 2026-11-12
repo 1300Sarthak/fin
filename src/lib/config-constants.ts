@@ -13,8 +13,11 @@ export const CONFIG_DEFAULTS = {
   monthly_budget_cents: "",
   hide_cash_from_net_worth: "0", // "1" = exclude the Cash account from net worth by default
   hide_zero_accounts: "0", // "1" = hide accounts with a $0 balance from lists/dropdowns
-  // Comma-separated route keys for optional sidebar destinations.
-  sidebar_visible_tabs: "overview,accounts,cash,transactions,spending,earnings,investments,holdings,transfers,refunds,upcoming,recurring,reminders,goals,future-plan,planning,taxes,research",
+  // Comma-separated sidebar section ids (src/components/kit/nav.ts). Lists saved
+  // before sections existed hold page ids; visibleSections() reads both.
+  sidebar_visible_tabs: "overview,assistant,accounts,transactions,spending,income,investments,plan,taxes,travel",
+  // Set once "assistant" has been added to a saved sidebar list (see getSidebarVisibleTabs).
+  sidebar_assistant_offered: "",
   // User-authored what-if assumptions for Future plan. This is deliberately
   // separate from imported balances and transaction analytics.
   future_plan: "",
